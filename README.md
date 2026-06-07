@@ -181,4 +181,4 @@ my-backend/
 
 ## License
 
-No license specified yet.
+This is a learning project. No license file has been added yet.
