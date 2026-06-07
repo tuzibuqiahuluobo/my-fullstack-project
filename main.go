@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/smtp" // 【新增】用来发邮件
 	"strings"  // 【新增】用来处理字符串
+	"time"     // 【新增】用来计算过期时间
 
 	"github.com/glebarez/sqlite"
 	"golang.org/x/crypto/bcrypt"
@@ -44,8 +45,14 @@ type UpdateRequest struct {
 	Password string `json:"password"`
 }
 
-// 【关键新增】全局临时记事本，记录邮箱对应的验证码
-var emailCodeMap = make(map[string]string)
+// 【新增】专门装验证码和过期时间的盒子
+type VerifyCode struct {
+	Code      string
+	ExpiresAt time.Time // 记录这个验证码什么时间过期
+}
+
+// 【修改】升级版记事本，现在里面装的是 VerifyCode 盒子
+var emailCodeMap = make(map[string]VerifyCode)
 
 func main() {
 	db, err := gorm.Open(sqlite.Open("data.db"), &gorm.Config{})
@@ -66,7 +73,7 @@ func main() {
 		// 没找到主管理员，说明是第一次运行，直接创建
 		hash, _ := bcrypt.GenerateFromPassword([]byte(SuperAdminPassword), bcrypt.DefaultCost)
 		db.Create(&User{
-			Username:     "最高指挥官",
+			Username:     "AdminUser",
 			Email:        SuperAdminEmail,
 			PasswordHash: string(hash),
 			Role:         2, // 2 代表最高主管理员
@@ -98,27 +105,50 @@ func main() {
 			return
 		}
 
-		// 2. 将明文密码进行 bcrypt 加密
+		// 2. 【优化】核对邮箱验证码的有效性和时间
+		savedData, exists := emailCodeMap[req.Email]
+		if !exists {
+			http.Error(w, `{"error": "请先获取验证码"}`, http.StatusUnauthorized)
+			return
+		}
+		// 检查是否超过了 5 分钟
+		if time.Now().After(savedData.ExpiresAt) {
+			delete(emailCodeMap, req.Email) // 顺手把过期的垃圾清理掉
+			http.Error(w, `{"error": "验证码已过期 (5分钟)，请重新发送"}`, http.StatusUnauthorized)
+			return
+		}
+		// 检查数字是否匹配
+		if savedData.Code != req.Code {
+			http.Error(w, `{"error": "验证码错误"}`, http.StatusUnauthorized)
+			return
+		}
+
+		// 3. 将明文密码进行 bcrypt 加密
 		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 		if err != nil {
 			http.Error(w, `{"error": "密码加密失败"}`, http.StatusInternalServerError)
 			return
 		}
 
-		// 3. 按照我们的图纸，组装一个新用户
+		// 4. 【更新】组装新用户，这次带上邮箱，并且默认 Role 为 0 (普通成员)
 		newUser := User{
 			Username:     req.Username,
 			PasswordHash: string(hashedPassword),
+			Email:        req.Email, // 存入前端传来的邮箱
+			Role:         0,         // 0 代表普通用户
 		}
 
-		// 4. 保存到数据库 (如果用户名重复，这里会报错)
+		// 5. 保存到数据库 (如果用户名重复，这里会报错)
 		result := db.Create(&newUser)
 		if result.Error != nil {
 			http.Error(w, `{"error": "该用户名已被注册或系统错误"}`, http.StatusBadRequest)
 			return
 		}
 
-		// 5. 告诉前端：注册成功
+		// 6. 【新增安全机制】注册成功后，立刻销毁记事本里的验证码，防止被重复使用
+		delete(emailCodeMap, req.Email)
+
+		// 7. 告诉前端：注册成功
 		fmt.Fprintf(w, `{"message": "注册成功！欢迎加入。"}`)
 	})
 
@@ -262,8 +292,11 @@ func main() {
 			return
 		}
 
-		// 6. 发送成功后，把验证码记在记事本里
-		emailCodeMap[email] = code
+		// 6. 发送成功后，把验证码和 5 分钟后的过期时间一起锁进保险箱
+		emailCodeMap[email] = VerifyCode{
+			Code:      code,
+			ExpiresAt: time.Now().Add(5 * time.Minute), // 当前时间往后推 5 分钟
+		}
 		fmt.Println("✅ 成功向", email, "发送验证码:", code)
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
