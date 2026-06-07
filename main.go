@@ -3,7 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand" // 【新增】用来生成随机数
 	"net/http"
+	"net/smtp" // 【新增】用来发邮件
+	"strings"  // 【新增】用来处理字符串
 
 	"github.com/glebarez/sqlite"
 	"golang.org/x/crypto/bcrypt"
@@ -27,6 +30,10 @@ type User struct {
 type RegisterRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+
+	// 新增字段：邮箱和验证码
+	Email string `json:"email"`
+	Code  string `json:"code"` // 前端填写的邮箱验证码
 }
 
 // 专门接收前端传来的更新数据的结构体
@@ -36,6 +43,9 @@ type UpdateRequest struct {
 	Avatar   string `json:"avatar"`
 	Password string `json:"password"`
 }
+
+// 【关键新增】全局临时记事本，记录邮箱对应的验证码
+var emailCodeMap = make(map[string]string)
 
 func main() {
 	db, err := gorm.Open(sqlite.Open("data.db"), &gorm.Config{})
@@ -201,6 +211,64 @@ func main() {
 		}
 
 		fmt.Fprintf(w, `{"message": "资料更新成功！"}`)
+	})
+
+	// 【新增】发送邮箱验证码接口
+	http.HandleFunc("/api/send-code", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		var req struct {
+			Email string `json:"email"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error": "数据格式错误"}`, http.StatusBadRequest)
+			return
+		}
+
+		// 1. 拦截后缀：仅允许 qq.com 和 gmail.com
+		email := strings.ToLower(req.Email)
+		if !strings.HasSuffix(email, "@qq.com") && !strings.HasSuffix(email, "@gmail.com") {
+			http.Error(w, `{"error": "抱歉，目前仅支持 QQ 或 Gmail 邮箱注册！"}`, http.StatusForbidden)
+			return
+		}
+
+		// 2. 生成 6 位随机验证码
+		code := fmt.Sprintf("%06d", rand.Intn(900000)+100000)
+
+		// 3. 配置发件人信息
+		senderEmail := "2672172829@qq.com"   // 替换成你的发件 QQ 邮箱
+		senderAuthCode := "soxouqzypsdbdjee" // 替换成 SMTP 授权码
+		smtpHost := "smtp.qq.com"
+		smtpPort := "587"
+
+		// 4. 拼装邮件内容
+		message := []byte("From: <" + senderEmail + "\r\n" +
+			"To: " + email + "\r\n" +
+			"Subject: 【开发者中心】您的注册验证码\r\n" +
+			"Content-Type: text/plain; charset=UTF-8\r\n\r\n" +
+			"欢迎注册开发者中心！您的验证码是：" + code + "。请勿将此验证码泄露给他人。")
+
+		// 5. 连接腾讯服务器并发射邮件
+		auth := smtp.PlainAuth("", senderEmail, senderAuthCode, smtpHost)
+		err := smtp.SendMail(smtpHost+":"+smtpPort, auth, senderEmail, []string{email}, message)
+		if err != nil {
+			fmt.Println("邮件发送失败:", err)
+			http.Error(w, `{"error": "邮件发送失败，请检查服务器网络"}`, http.StatusInternalServerError)
+			return
+		}
+
+		// 6. 发送成功后，把验证码记在记事本里
+		emailCodeMap[email] = code
+		fmt.Println("✅ 成功向", email, "发送验证码:", code)
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"message": "验证码发送成功，请注意查收！",
+		})
 	})
 
 	fmt.Println("🚀 服务器已启动！运行在 http://localhost:8080")
