@@ -17,6 +17,10 @@ type User struct {
 	Avatar       string
 	Gender       string
 	Age          int
+
+	// 新增字段：邮箱和身份标识
+	Email string `json:"email" gorm:"unique"` // 邮箱，必须唯一
+	Role  int    `json:"role"`                // 身份标识：0=普通成员, 1=管理员, 2=主管理员(群主)
 }
 
 // 专门用来接收前端传来的临时数据的结构体
@@ -40,6 +44,31 @@ func main() {
 		return
 	}
 	db.AutoMigrate(&User{})
+
+	// 【新增】主管理员强制加冕逻辑
+	// 这里写死你的专属邮箱和初始密码。如果数据库里没有这个主管理员，系统会自动创建；
+	// 如果别人试图在数据库里修改你的权限，系统每次重启都会强行把你恢复为 Role = 2
+	SuperAdminEmail := "2672172829@qq.com" // 请替换成你真实的邮箱！
+	SuperAdminPassword := "ASDasd5201314." // 你的初始最高权限密码
+
+	var superAdmin User
+	if result := db.Where("email = ?", SuperAdminEmail).First(&superAdmin); result.Error != nil {
+		// 没找到主管理员，说明是第一次运行，直接创建
+		hash, _ := bcrypt.GenerateFromPassword([]byte(SuperAdminPassword), bcrypt.DefaultCost)
+		db.Create(&User{
+			Username:     "最高指挥官",
+			Email:        SuperAdminEmail,
+			PasswordHash: string(hash),
+			Role:         2, // 2 代表最高主管理员
+			Avatar:       "https://api.dicebear.com/7.x/adventurer/svg?seed=Admin",
+		})
+		fmt.Println("👑 主管理员账号已自动生成！")
+	} else if superAdmin.Role != 2 {
+		// 如果找到了账号，但发现 Role 被人恶意改小了，强行改回 2
+		superAdmin.Role = 2
+		db.Save(&superAdmin)
+		fmt.Println("🛡️ 主管理员权限已强制修复！")
+	}
 
 	// 【新增】注册接口
 	http.HandleFunc("/api/register", func(w http.ResponseWriter, r *http.Request) {
