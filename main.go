@@ -54,13 +54,54 @@ type VerifyCode struct {
 // 【修改】升级版记事本，现在里面装的是 VerifyCode 盒子
 var emailCodeMap = make(map[string]VerifyCode)
 
+// 【新增】社区帖子表结构
+type Post struct {
+	ID        uint      `json:"id" gorm:"primaryKey"`
+	Username  string    `json:"username"`   // 发帖人名字
+	Avatar    string    `json:"avatar"`     // 发帖人头像
+	Content   string    `json:"content"`    // 帖子正文
+	CreatedAt time.Time `json:"created_at"` // 发帖时间
+}
+
+// 专门接收前端发帖数据的结构体
+type CreatePostRequest struct {
+	Username string `json:"username"`
+	Avatar   string `json:"avatar"`
+	Content  string `json:"content"`
+}
+
 func main() {
 	db, err := gorm.Open(sqlite.Open("data.db"), &gorm.Config{})
 	if err != nil {
 		fmt.Println("数据库连接失败:", err)
 		return
 	}
-	db.AutoMigrate(&User{})
+	db.AutoMigrate(&User{}, &Post{})
+
+	// 【新增】如果社区是空的，自动塞入几条初始动态活跃一下气氛
+	var count int64
+	db.Model(&Post{}).Count(&count)
+	if count == 0 {
+		db.Create(&Post{
+			Username:  "最高指挥官",
+			Avatar:    "https://api.dicebear.com/7.x/adventurer/svg?seed=Admin",
+			Content:   "分享一下我最近用 Godot 做战棋游戏的心得，HD-2D 画风真的太棒了！框架已经搭好，准备研究后续的章节剧情模块。",
+			CreatedAt: time.Now().Add(-2 * time.Hour), // 2小时前发的
+		})
+		db.Create(&Post{
+			Username:  "技术宅小明",
+			Avatar:    "https://api.dicebear.com/7.x/adventurer/svg?seed=Ming",
+			Content:   "有人知道用 Python 写类似《杀戮尖塔》的那种分层 DAG（有向无环图）地图生成，该用什么算法最优吗？卡在寻路逻辑这里了。",
+			CreatedAt: time.Now().Add(-5 * time.Hour),
+		})
+		db.Create(&Post{
+			Username:  "字幕烤肉Man",
+			Avatar:    "https://api.dicebear.com/7.x/adventurer/svg?seed=Sub",
+			Content:   "刚用 FFmpeg 把绝区零角色的 PV 字幕轴打完，爱芮的台词翻译和校对花了不少时间，准备压制导出了~",
+			CreatedAt: time.Now().Add(-24 * time.Hour),
+		})
+		fmt.Println("📝 社区初始动态已加载！")
+	}
 
 	// 【新增】主管理员强制加冕逻辑
 	// 这里写死你的专属邮箱和初始密码。如果数据库里没有这个主管理员，系统会自动创建；
@@ -301,6 +342,66 @@ func main() {
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"message": "验证码发送成功，请注意查收！",
+		})
+	})
+
+	// 【新增】获取社区帖子列表接口
+	http.HandleFunc("/api/posts", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		// 【关键修复】处理浏览器的 CORS 预检请求
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		var posts []Post
+		// 从数据库里查出所有帖子，按照创建时间倒序排列（最新的在最上面）
+		db.Order("created_at desc").Find(&posts)
+
+		json.NewEncoder(w).Encode(posts)
+	})
+
+	// 【新增】发布新动态接口
+	http.HandleFunc("/api/create-post", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		// 1. 拆开前端寄来的帖子数据
+		var req CreatePostRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error": "数据格式不对"}`, http.StatusBadRequest)
+			return
+		}
+
+		if req.Content == "" {
+			http.Error(w, `{"error": "帖子内容不能为空"}`, http.StatusBadRequest)
+			return
+		}
+
+		// 2. 组装成数据库认识的 Post 格式，打上当前时间戳
+		newPost := Post{
+			Username:  req.Username,
+			Avatar:    req.Avatar,
+			Content:   req.Content,
+			CreatedAt: time.Now(),
+		}
+
+		// 3. 存入数据库
+		if result := db.Create(&newPost); result.Error != nil {
+			http.Error(w, `{"error": "发帖失败，数据库错误"}`, http.StatusInternalServerError)
+			return
+		}
+
+		// 4. 告诉前端：发布成功！
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"message": "发布成功！",
 		})
 	})
 
