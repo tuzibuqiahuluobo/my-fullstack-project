@@ -271,3 +271,49 @@ func handleCreatePost(w http.ResponseWriter, r *http.Request) {
 		"message": "发布成功！",
 	})
 }
+
+// ---------------------------------------------------------
+// 7. 删除帖子接口
+// ---------------------------------------------------------
+func handleDeletePost(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	// 临时定义一个结构体来接收前端传来的数据
+	var req struct {
+		PostID   uint   `json:"post_id"`
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error": "数据格式不对"}`, http.StatusBadRequest)
+		return
+	}
+
+	// 1. 去数据库里寻找这个帖子
+	var post Post
+	if result := db.First(&post, req.PostID); result.Error != nil {
+		http.Error(w, `{"error": "找不到该帖子，可能已被删除"}`, http.StatusNotFound)
+		return
+	}
+
+	// 2. 【核心安检】权限核对：只有帖子的主人，或者“最高指挥官”才有资格删除
+	if post.Username != req.Username && req.Username != "最高指挥官" {
+		http.Error(w, `{"error": "越权操作：您只能删除自己的帖子！"}`, http.StatusForbidden)
+		return
+	}
+
+	// 3. 执行物理销毁
+	if result := db.Delete(&post); result.Error != nil {
+		http.Error(w, `{"error": "删除失败，数据库出错"}`, http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "帖子已永久销毁",
+	})
+}
