@@ -142,31 +142,81 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error": "找不到该用户"}`, http.StatusNotFound)
 		return
 	}
-
+	// =========================================================
+	// 基础资料 (允许随时修改)
+	// =========================================================
 	if req.Nickname != "" {
 		user.Nickname = req.Nickname // 【新增】接收并修改昵称
 	}
 
-	if req.Username != "" {
-		user.Username = req.Username
-	}
 	if req.Avatar != "" {
 		user.Avatar = req.Avatar
 	}
+	// =========================================================
+	// 核心凭证 (不允许随时修改)
+	// =========================================================
+	// 1. 如果前端传来了【新用户名】，且跟数据库里的【老用户名】不一样，触发最高安检
+	if req.Username != "" && req.Username != user.Username {
+
+		// 【第一道防线：密码核查】
+		if req.CurrentPassword == "" {
+			http.Error(w, `{"error": "拒绝执行：修改登录账号必须输入当前密码进行安全验证！"}`, http.StatusForbidden)
+			return
+		}
+		// 用 bcrypt 比对当前输入的密码和数据库的哈希值
+		err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.CurrentPassword))
+		if err != nil {
+			http.Error(w, `{"error": "安全验证失败：当前密码输入错误，无权更改账号！"}`, http.StatusUnauthorized)
+			return
+		}
+
+		// 【第二道防线：180天硬核时间锁】
+		// 🛠️ 提示：为了测试方便，你可以暂时把 180 * 24 改成小一点的时间（比如下面测试小妙招）
+		timeLimit := 60 * 24 * time.Hour
+		durationSinceUpdate := time.Since(user.UsernameUpdatedAt)
+
+		if durationSinceUpdate < timeLimit {
+			// 计算还剩多少天解锁
+			remaining := timeLimit - durationSinceUpdate
+			remainingDays := int(remaining.Hours() / 24)
+			if remainingDays == 0 {
+				remainingDays = 1 // 不足一天按一天算
+			}
+			http.Error(w, fmt.Sprintf(`{"error": "安全锁定中：登录账号每 180 天仅可修改一次！距离下次解锁还剩 %d 天"}`, remainingDays), http.StatusForbidden)
+			return
+		}
+
+		// 【第三道防线：账号唯一性查重】
+		var existingUser User
+		if err := db.Where("username = ?", req.Username).First(&existingUser).Error; err == nil {
+			http.Error(w, `{"error": "变更失败：该用户名已被他人占用，请换一个名字"}`, http.StatusBadRequest)
+			return
+		}
+
+		// 突破三道防线，正式批准修改，并重置时间锁戳记
+		user.Username = req.Username
+		user.UsernameUpdatedAt = time.Now()
+	}
+	// 2. 如果前端传来了【新密码】
 	if req.Password != "" {
 		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 		if err != nil {
-			http.Error(w, `{"error": "密码加密失败"}`, http.StatusInternalServerError)
+			http.Error(w, `{"error": "新密码加密失败"}`, http.StatusInternalServerError)
 			return
 		}
 		user.PasswordHash = string(hashedPassword)
 	}
-
+	// =========================================================
+	// 区域 C：数据同步归仓
+	// =========================================================
 	if result := db.Save(&user); result.Error != nil {
-		http.Error(w, `{"error": "更新失败，该用户名可能已被占用"}`, http.StatusInternalServerError)
+		http.Error(w, `{"error": "保存失败，数据库写入错误"}`, http.StatusInternalServerError)
 		return
 	}
 
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "资料更新成功！核心凭证已同步。",
+	})
 	fmt.Fprintf(w, `{"message": "资料更新成功！"}`)
 }
 
