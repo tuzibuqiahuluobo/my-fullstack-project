@@ -148,17 +148,14 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Nickname != "" {
 		user.Nickname = req.Nickname // 【新增】接收并修改昵称
 	}
-
 	if req.Avatar != "" {
 		user.Avatar = req.Avatar
 	}
 	// =========================================================
 	// 核心凭证 (不允许随时修改)
 	// =========================================================
-	// 1. 如果前端传来了【新用户名】，且跟数据库里的【老用户名】不一样，触发最高安检
+	// 1. 核对新老用户名
 	if req.Username != "" && req.Username != user.Username {
-
-		// 【第一道防线：密码核查】
 		if req.CurrentPassword == "" {
 			http.Error(w, `{"error": "拒绝执行：修改登录账号必须输入当前密码进行安全验证！"}`, http.StatusForbidden)
 			return
@@ -169,9 +166,6 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error": "安全验证失败：当前密码输入错误，无权更改账号！"}`, http.StatusUnauthorized)
 			return
 		}
-
-		// 【第二道防线：180天硬核时间锁】
-		// 🛠️ 提示：为了测试方便，你可以暂时把 180 * 24 改成小一点的时间（比如下面测试小妙招）
 		timeLimit := 60 * 24 * time.Hour
 		durationSinceUpdate := time.Since(user.UsernameUpdatedAt)
 
@@ -186,14 +180,11 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 【第三道防线：账号唯一性查重】
 		var existingUser User
 		if err := db.Where("username = ?", req.Username).First(&existingUser).Error; err == nil {
 			http.Error(w, `{"error": "变更失败：该用户名已被他人占用，请换一个名字"}`, http.StatusBadRequest)
 			return
 		}
-
-		// 突破三道防线，正式批准修改，并重置时间锁戳记
 		user.Username = req.Username
 		user.UsernameUpdatedAt = time.Now()
 	}
@@ -207,7 +198,7 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 		user.PasswordHash = string(hashedPassword)
 	}
 	// =========================================================
-	// 区域 C：数据同步归仓
+	// 数据同步归仓
 	// =========================================================
 	if result := db.Save(&user); result.Error != nil {
 		http.Error(w, `{"error": "保存失败，数据库写入错误"}`, http.StatusInternalServerError)
