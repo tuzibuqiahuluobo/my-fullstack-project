@@ -243,6 +243,21 @@ func handleGetPosts(w http.ResponseWriter, r *http.Request) {
 	var posts []Post
 	db.Order("created_at desc").Find(&posts)
 
+	// 2. 循环每一条帖子，去用户表动态抓取最新的昵称和头像
+	for i := 0; i < len(posts); i++ {
+		var user User
+		// 根据帖子记录里的唯一 username，去用户表搜寻其当下的状态
+		if err := db.Where("username = ?", posts[i].Username).First(&user).Error; err == nil {
+			// 用用户表里最新的数据，覆盖掉帖子表里的旧快照
+			posts[i].Nickname = user.Nickname
+			posts[i].Avatar = user.Avatar
+		} else {
+			// 该用户如果被销户了，帖子会显示“已注销用户”
+			posts[i].Nickname = "已注销用户"
+			posts[i].Avatar = "https://api.dicebear.com/7.x/adventurer/svg?seed=deleted"
+		}
+	}
+
 	json.NewEncoder(w).Encode(posts)
 }
 
