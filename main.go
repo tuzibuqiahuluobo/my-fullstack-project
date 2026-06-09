@@ -6,10 +6,10 @@ import (
 )
 
 func main() {
-	// 1. 唤醒数据车间：初始化数据库 (会自动调用 models.go 里的函数)
+	// 1. 初始化数据库 (会自动调用 models.go 里的函数)
 	initDB()
 
-	// 2. 路由调度台：把前端发来的请求，精准派发给 api.go 里的工人
+	// 2. 把前端发来的请求，精准派发给 api.go 里的接口函数
 	http.HandleFunc("/api/register", handleRegister)
 	http.HandleFunc("/api/login", handleLogin)
 	http.HandleFunc("/api/update", handleUpdate)

@@ -183,7 +183,6 @@ func handleSendCode(w http.ResponseWriter, r *http.Request) {
 
 	code := fmt.Sprintf("%06d", rand.Intn(900000)+100000)
 
-	// ⚠️ 这里需要替换成你自己的授权码！
 	senderEmail := "2672172829@qq.com"
 	senderAuthCode := "soxouqzypsdbdjee"
 	smtpHost := "smtp.qq.com"
@@ -301,8 +300,8 @@ func handleDeletePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. 【核心安检】权限核对：只有帖子的主人，或者“最高指挥官”才有资格删除
-	if post.Username != req.Username && req.Username != "最高指挥官" {
+	// 2. 权限核对：只有帖子的主人，或者“超级管理员”才有资格删除
+	if post.Username != req.Username && req.Username != "超级管理员" {
 		http.Error(w, `{"error": "越权操作：您只能删除自己的帖子！"}`, http.StatusForbidden)
 		return
 	}
