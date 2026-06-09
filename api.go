@@ -316,3 +316,68 @@ func handleDeletePost(w http.ResponseWriter, r *http.Request) {
 		"message": "帖子已永久销毁",
 	})
 }
+
+// ---------------------------------------------------------
+// 8. 【管理员特权】获取所有用户列表
+// ---------------------------------------------------------
+func handleGetUsers(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	// 安全检查：由于暂时没有做复杂的 JWT 令牌，通过 URL 参数或请求头核对身份
+	adminName := r.URL.Query().Get("admin")
+	if adminName != "超级管理员" {
+		http.Error(w, `{"error": "越权访问：你不是超级管理员！"}`, http.StatusForbidden)
+		return
+	}
+
+	var users []User
+	// 查出所有用户（GORM 自动会忽略在模型里打上 json:"-" 的密码字段）
+	db.Find(&users)
+
+	json.NewEncoder(w).Encode(users)
+}
+
+// ---------------------------------------------------------
+// 9. 【管理员特权】强制注销（删除）某个用户
+// ---------------------------------------------------------
+func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	var req struct {
+		AdminName string `json:"admin_name"`
+		TargetUID uint   `json:"target_uid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error": "数据格式不对"}`, http.StatusBadRequest)
+		return
+	}
+
+	// 核心校验
+	if req.AdminName != "超级管理员" {
+		http.Error(w, `{"error": "拒绝执行：只有超级管理员拥有终极裁决权！"}`, http.StatusForbidden)
+		return
+	}
+
+	// 执行物理删除
+	var user User
+	if result := db.Delete(&user, req.TargetUID); result.Error != nil {
+		http.Error(w, `{"error": "注销失败，数据库错误"}`, http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "该用户已被强制剥夺权限并注销账号",
+	})
+}

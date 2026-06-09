@@ -75,7 +75,6 @@ func initDB() {
 	// 同步表结构
 	db.AutoMigrate(&User{}, &Post{})
 
-	// --- 强制加冕主管理员逻辑 ---
 	SuperAdminEmail := "2672172829@qq.com"
 	SuperAdminPassword := "ASDasd5201314."
 
@@ -83,41 +82,16 @@ func initDB() {
 	if result := db.Where("email = ?", SuperAdminEmail).First(&superAdmin); result.Error != nil {
 		hash, _ := bcrypt.GenerateFromPassword([]byte(SuperAdminPassword), bcrypt.DefaultCost)
 		db.Create(&User{
-			Username:     "最高指挥官",
+			Username:     "超级管理员",
 			Email:        SuperAdminEmail,
 			PasswordHash: string(hash),
 			Role:         2,
 			Avatar:       "https://api.dicebear.com/7.x/adventurer/svg?seed=Admin",
 		})
-		fmt.Println("👑 主管理员账号已自动生成！")
+		fmt.Println("👑 超级管理员账号已自动生成！")
 	} else if superAdmin.Role != 2 {
 		superAdmin.Role = 2
 		db.Save(&superAdmin)
-		fmt.Println("🛡️ 主管理员权限已强制修复！")
-	}
-
-	// --- 社区初始动态逻辑 ---
-	var count int64
-	db.Model(&Post{}).Count(&count)
-	if count == 0 {
-		db.Create(&Post{
-			Username:  "最高指挥官",
-			Avatar:    "https://api.dicebear.com/7.x/adventurer/svg?seed=Admin",
-			Content:   "分享一下我最近用 Godot 做战棋游戏的心得，HD-2D 画风真的太棒了！框架已经搭好，准备研究后续的章节剧情模块。",
-			CreatedAt: time.Now().Add(-2 * time.Hour),
-		})
-		db.Create(&Post{
-			Username:  "技术宅小明",
-			Avatar:    "https://api.dicebear.com/7.x/adventurer/svg?seed=Ming",
-			Content:   "有人知道用 Python 写类似《杀戮尖塔》的那种分层 DAG（有向无环图）地图生成，该用什么算法最优吗？卡在寻路逻辑这里了。",
-			CreatedAt: time.Now().Add(-5 * time.Hour),
-		})
-		db.Create(&Post{
-			Username:  "字幕烤肉Man",
-			Avatar:    "https://api.dicebear.com/7.x/adventurer/svg?seed=Sub",
-			Content:   "刚用 FFmpeg 把绝区零角色的 PV 字幕轴打完，爱芮的台词翻译和校对花了不少时间，准备压制导出了~",
-			CreatedAt: time.Now().Add(-24 * time.Hour),
-		})
-		fmt.Println("📝 社区初始动态已加载！")
+		fmt.Println("🛡️ 超级管理员权限已强制修复！")
 	}
 }

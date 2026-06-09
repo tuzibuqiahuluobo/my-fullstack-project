@@ -17,6 +17,8 @@ func main() {
 	http.HandleFunc("/api/posts", handleGetPosts)
 	http.HandleFunc("/api/create-post", handleCreatePost)
 	http.HandleFunc("/api/delete-post", handleDeletePost)
+	http.HandleFunc("/api/users", handleGetUsers)
+	http.HandleFunc("/api/delete-user", handleDeleteUser)
 
 	// 3. 启动服务器
 	fmt.Println("🚀 服务器已启动！运行在 http://localhost:8080")
