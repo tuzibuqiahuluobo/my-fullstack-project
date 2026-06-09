@@ -318,7 +318,7 @@ func handleDeletePost(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------
-// 8. 【管理员特权】获取所有用户列表
+// 8. 获取所有用户列表
 // ---------------------------------------------------------
 func handleGetUsers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -344,7 +344,7 @@ func handleGetUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------
-// 9. 【管理员特权】强制注销（删除）某个用户
+// 9. 强制注销（删除）某个用户
 // ---------------------------------------------------------
 func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
