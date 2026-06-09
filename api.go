@@ -53,10 +53,11 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newUser := User{
-		Username:     req.Username,
-		PasswordHash: string(hashedPassword),
-		Email:        req.Email,
-		Role:         0,
+		Username:          req.Username,
+		PasswordHash:      string(hashedPassword),
+		Email:             req.Email,
+		Role:              0,
+		UsernameUpdatedAt: time.Now(), // 初始注册视为一次修改，开始计算180天
 	}
 
 	result := db.Create(&newUser)
@@ -64,6 +65,14 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error": "该用户名或邮箱已被注册"}`, http.StatusBadRequest)
 		return
 	}
+
+	// ✨【核心新增】生成默认昵称：user_ + 刚刚生成的自增 UID
+	newUser.Nickname = fmt.Sprintf("user_%d", newUser.UID)
+	// 如果用户没有设置头像，顺手给他一个根据UID生成的漂亮默认头像
+	if newUser.Avatar == "" {
+		newUser.Avatar = fmt.Sprintf("https://api.dicebear.com/7.x/adventurer/svg?seed=user_%d", newUser.UID)
+	}
+	db.Save(&newUser) // 将昵称和头像再次同步回数据库
 
 	delete(emailCodeMap, req.Email)
 	fmt.Fprintf(w, `{"message": "注册成功！欢迎加入。"}`)
@@ -102,9 +111,11 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "登录成功！欢迎回来，" + user.Username,
-		"uid":     user.UID,
-		"avatar":  user.Avatar,
+		"message":  "登录成功！欢迎回来，" + user.Username,
+		"uid":      user.UID,
+		"avatar":   user.Avatar,
+		"username": user.Username, // 把原用户名传回去备用
+		"nickname": user.Nickname, // 【新增】把新的昵称发给前端
 	})
 }
 
@@ -130,6 +141,10 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if result := db.First(&user, req.UID); result.Error != nil {
 		http.Error(w, `{"error": "找不到该用户"}`, http.StatusNotFound)
 		return
+	}
+
+	if req.Nickname != "" {
+		user.Nickname = req.Nickname // 【新增】接收并修改昵称
 	}
 
 	if req.Username != "" {
@@ -256,6 +271,7 @@ func handleCreatePost(w http.ResponseWriter, r *http.Request) {
 
 	newPost := Post{
 		Username:  req.Username,
+		Nickname:  req.Nickname, // ✨【新增这行】将昵称锁进数据库
 		Avatar:    req.Avatar,
 		Content:   req.Content,
 		CreatedAt: time.Now(),
