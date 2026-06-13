@@ -126,3 +126,58 @@ func TestAdminEndpointRejectsNormalUser(t *testing.T) {
 		t.Fatalf("期望状态码 403，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestRecoverAccountReturnsUsernameWithValidCode(t *testing.T) {
+	setupTestDB(t)
+	createTestUser(t, "sunny", 0)
+	saveEmailCode("sunny@example.com", "123456")
+
+	req := newJSONRequest(t, http.MethodPost, "/api/recover-account", map[string]string{
+		"email": "sunny@example.com",
+		"code":  "123456",
+	})
+	rec := httptest.NewRecorder()
+
+	handleRecoverAccount(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望状态码 200，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if body["username"] != "sunny" {
+		t.Fatalf("期望找回账号 sunny，实际得到 %v", body["username"])
+	}
+}
+
+func TestResetPasswordAllowsLoginWithNewPassword(t *testing.T) {
+	setupTestDB(t)
+	createTestUser(t, "rainy", 0)
+	saveEmailCode("rainy@example.com", "654321")
+
+	req := newJSONRequest(t, http.MethodPost, "/api/reset-password", map[string]string{
+		"email":        "rainy@example.com",
+		"code":         "654321",
+		"new_password": "newpass123",
+	})
+	rec := httptest.NewRecorder()
+
+	handleResetPassword(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望状态码 200，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+
+	loginReq := newJSONRequest(t, http.MethodPost, "/api/login", map[string]string{
+		"username": "rainy",
+		"password": "newpass123",
+	})
+	loginRec := httptest.NewRecorder()
+	handleLogin(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("重置密码后登录失败，状态码 %d，响应: %s", loginRec.Code, loginRec.Body.String())
+	}
+}

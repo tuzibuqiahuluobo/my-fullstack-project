@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/smtp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,95 @@ func generateVerifyCode() (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%06d", n.Int64()+100000), nil
+}
+
+func validateSupportedEmail(email string) bool {
+	// 目前邮箱验证码只开放 QQ 和 Gmail，前后端都限制一次，避免用户填了无法发送的邮箱。
+	return strings.HasSuffix(email, "@qq.com") || strings.HasSuffix(email, "@gmail.com")
+}
+
+func sendVerifyCodeToEmail(email string, subject string, bodyPrefix string) (string, error) {
+	// 统一生成验证码，注册、找回账号、重置密码都用同一套规则，后续维护会更简单。
+	code, err := generateVerifyCode()
+	if err != nil {
+		return "", err
+	}
+
+	// SMTP_PASS 是邮箱授权码，不能写死在代码里；本地没配置时会退回控制台验证码，方便开发调试。
+	senderEmail := getEnv("SMTP_USER", "2672172829@qq.com")
+	senderAuthCode := getEnv("SMTP_PASS", "")
+	smtpHost := getEnv("SMTP_HOST", "smtp.qq.com")
+	smtpPort := getEnv("SMTP_PORT", "587")
+
+	if senderEmail == "" || senderAuthCode == "" {
+		saveEmailCode(email, code)
+		fmt.Println("开发模式验证码:", email, code)
+		return "邮件服务未配置，开发验证码已输出到后端控制台", nil
+	}
+
+	// 邮件正文集中在这里组装，注册、找回账号、重置密码都可以复用同一套发送逻辑。
+	message := []byte("From: <" + senderEmail + ">\r\n" +
+		"To: " + email + "\r\n" +
+		"Subject: " + subject + "\r\n" +
+		"Content-Type: text/plain; charset=UTF-8\r\n\r\n" +
+		bodyPrefix + "您的验证码是：" + code + "。验证码 5 分钟内有效，请勿泄露给他人。")
+
+	auth := smtp.PlainAuth("", senderEmail, senderAuthCode, smtpHost)
+	if err := smtp.SendMail(smtpHost+":"+smtpPort, auth, senderEmail, []string{email}, message); err != nil {
+		return "", err
+	}
+
+	saveEmailCode(email, code)
+	return "验证码发送成功，请注意查收！", nil
+}
+
+func verifyEmailCode(email string, code string) (bool, string) {
+	// map 是共享内存，读写时加锁可以避免多个请求同时操作造成数据错乱。
+	emailCodeMu.Lock()
+	savedData, exists := emailCodeMap[email]
+	emailCodeMu.Unlock()
+	if !exists {
+		return false, "请先获取验证码"
+	}
+	if time.Now().After(savedData.ExpiresAt) {
+		emailCodeMu.Lock()
+		delete(emailCodeMap, email)
+		emailCodeMu.Unlock()
+		return false, "验证码已过期 (5分钟)，请重新发送"
+	}
+	if savedData.Code != code {
+		return false, "验证码错误"
+	}
+	return true, ""
+}
+
+func clearEmailCode(email string) {
+	// 验证码使用成功后立刻删除，避免同一个验证码被重复使用。
+	emailCodeMu.Lock()
+	delete(emailCodeMap, email)
+	emailCodeMu.Unlock()
+}
+
+func enrichPostForResponse(post *Post, currentUser User, hasLoginUser bool) {
+	var author User
+	if err := db.Where("username = ?", post.Username).First(&author).Error; err == nil {
+		post.Nickname = author.Nickname
+		post.Avatar = author.Avatar
+	} else {
+		post.Nickname = "已注销用户"
+		post.Avatar = "https://api.dicebear.com/7.x/adventurer/svg?seed=deleted"
+	}
+
+	// 帖子详情、社区列表、我的收藏都需要这些展示数据，集中到这里避免三处写重复逻辑。
+	db.Where("post_id = ?", post.ID).Order("created_at asc").Find(&post.Comments)
+	db.Model(&Favorite{}).Where("post_id = ?", post.ID).Count(&post.FavoriteCount)
+	post.IsFavorited = false
+	if hasLoginUser {
+		var fav Favorite
+		if err := db.Where("uid = ? AND post_id = ?", currentUser.UID, post.ID).First(&fav).Error; err == nil {
+			post.IsFavorited = true
+		}
+	}
 }
 
 // ---------------------------------------------------------
@@ -77,22 +167,8 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	emailCodeMu.Lock()
-	savedData, exists := emailCodeMap[req.Email]
-	emailCodeMu.Unlock()
-	if !exists {
-		writeError(w, http.StatusUnauthorized, "请先获取验证码")
-		return
-	}
-	if time.Now().After(savedData.ExpiresAt) {
-		emailCodeMu.Lock()
-		delete(emailCodeMap, req.Email)
-		emailCodeMu.Unlock()
-		writeError(w, http.StatusUnauthorized, "验证码已过期 (5分钟)，请重新发送")
-		return
-	}
-	if savedData.Code != req.Code {
-		writeError(w, http.StatusUnauthorized, "验证码错误")
+	if ok, message := verifyEmailCode(req.Email, req.Code); !ok {
+		writeError(w, http.StatusUnauthorized, message)
 		return
 	}
 
@@ -122,9 +198,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	emailCodeMu.Lock()
-	delete(emailCodeMap, req.Email)
-	emailCodeMu.Unlock()
+	clearEmailCode(req.Email)
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "注册成功！欢迎加入。"})
 }
@@ -298,46 +372,19 @@ func handleSendCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	email := strings.ToLower(strings.TrimSpace(req.Email))
-	if !strings.HasSuffix(email, "@qq.com") && !strings.HasSuffix(email, "@gmail.com") {
+	if !validateSupportedEmail(email) {
 		writeError(w, http.StatusForbidden, "抱歉，目前仅支持 QQ 或 Gmail 邮箱注册")
 		return
 	}
 
-	code, err := generateVerifyCode()
+	message, err := sendVerifyCodeToEmail(email, "【SunShine】您的验证码", "欢迎使用 SunShine！")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "验证码生成失败")
-		return
-	}
-
-	senderEmail := getEnv("SMTP_USER", "")
-	senderAuthCode := getEnv("SMTP_PASS", "")
-	smtpHost := getEnv("SMTP_HOST", "smtp.qq.com")
-	smtpPort := getEnv("SMTP_PORT", "587")
-
-	if senderEmail == "" || senderAuthCode == "" {
-		saveEmailCode(email, code)
-		fmt.Println("开发模式验证码:", email, code)
-		writeJSON(w, http.StatusOK, map[string]string{
-			"message": "邮件服务未配置，开发验证码已输出到后端控制台",
-		})
-		return
-	}
-
-	message := []byte("From: <" + senderEmail + ">\r\n" +
-		"To: " + email + "\r\n" +
-		"Subject: 【开发者中心】您的注册验证码\r\n" +
-		"Content-Type: text/plain; charset=UTF-8\r\n\r\n" +
-		"欢迎注册开发者中心！您的验证码是：" + code + "。请勿将此验证码泄露给他人。")
-
-	auth := smtp.PlainAuth("", senderEmail, senderAuthCode, smtpHost)
-	if err := smtp.SendMail(smtpHost+":"+smtpPort, auth, senderEmail, []string{email}, message); err != nil {
 		fmt.Println("邮件发送失败:", err)
 		writeError(w, http.StatusInternalServerError, "邮件发送失败，请检查服务器网络")
 		return
 	}
 
-	saveEmailCode(email, code)
-	writeJSON(w, http.StatusOK, map[string]string{"message": "验证码发送成功，请注意查收！"})
+	writeJSON(w, http.StatusOK, map[string]string{"message": message})
 }
 
 // ---------------------------------------------------------
@@ -357,31 +404,40 @@ func handleGetPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for i := 0; i < len(posts); i++ {
-		var user User
-		if err := db.Where("username = ?", posts[i].Username).First(&user).Error; err == nil {
-			posts[i].Nickname = user.Nickname
-			posts[i].Avatar = user.Avatar
-		} else {
-			posts[i].Nickname = "已注销用户"
-			posts[i].Avatar = "https://api.dicebear.com/7.x/adventurer/svg?seed=deleted"
-		}
-
-		db.Where("post_id = ?", posts[i].ID).Order("created_at asc").Find(&posts[i].Comments)
-		db.Model(&Favorite{}).Where("post_id = ?", posts[i].ID).Count(&posts[i].FavoriteCount)
-
-		if hasLoginUser {
-			var fav Favorite
-			if err := db.Where("uid = ? AND post_id = ?", currentUser.UID, posts[i].ID).First(&fav).Error; err == nil {
-				posts[i].IsFavorited = true
-			}
-		}
+		enrichPostForResponse(&posts[i], currentUser, hasLoginUser)
 	}
 
 	writeJSON(w, http.StatusOK, posts)
 }
 
 // ---------------------------------------------------------
-// 6. 发布帖子接口
+// 6. 获取单条帖子详情
+// ---------------------------------------------------------
+func handleGetPostDetail(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
+	postID, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("id")))
+	if err != nil || postID <= 0 {
+		writeError(w, http.StatusBadRequest, "帖子 ID 不正确")
+		return
+	}
+
+	var post Post
+	if err := db.First(&post, uint(postID)).Error; err != nil {
+		writeError(w, http.StatusNotFound, "找不到该帖子，可能已被删除")
+		return
+	}
+
+	// 详情页允许未登录读取；如果已登录，就额外返回当前用户是否收藏。
+	currentUser, hasLoginUser := currentUserFromRequest(r)
+	enrichPostForResponse(&post, currentUser, hasLoginUser)
+	writeJSON(w, http.StatusOK, post)
+}
+
+// ---------------------------------------------------------
+// 7. 发布帖子接口
 // ---------------------------------------------------------
 func handleCreatePost(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
@@ -422,7 +478,7 @@ func handleCreatePost(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------
-// 7. 删除帖子接口
+// 8. 删除帖子接口
 // ---------------------------------------------------------
 func handleDeletePost(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
@@ -464,7 +520,7 @@ func handleDeletePost(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------
-// 8. 获取所有用户列表
+// 9. 获取所有用户列表
 // ---------------------------------------------------------
 func handleGetUsers(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
@@ -485,7 +541,7 @@ func handleGetUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------
-// 9. 强制注销（删除）某个用户
+// 10. 强制注销（删除）某个用户
 // ---------------------------------------------------------
 func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
@@ -525,7 +581,7 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------
-// 10. 发表评论接口
+// 11. 发表评论接口
 // ---------------------------------------------------------
 func handleCreateComment(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
@@ -576,7 +632,7 @@ func handleCreateComment(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------
-// 11. 切换收藏状态接口 (点一下收藏，再点一下取消)
+// 12. 切换收藏状态接口 (点一下收藏，再点一下取消)
 // ---------------------------------------------------------
 func handleToggleFavorite(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
@@ -620,7 +676,49 @@ func handleToggleFavorite(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------
-// 12. 删除评论接口
+// 13. 获取我的收藏帖子
+// ---------------------------------------------------------
+func handleGetMyFavorites(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
+	user, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+
+	var favorites []Favorite
+	if err := db.Where("uid = ?", user.UID).Find(&favorites).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "收藏列表读取失败")
+		return
+	}
+
+	// 先取出收藏表里的 post_id，再一次性查询帖子，避免循环里反复查帖子影响性能。
+	postIDs := make([]uint, 0, len(favorites))
+	for _, fav := range favorites {
+		postIDs = append(postIDs, fav.PostID)
+	}
+	if len(postIDs) == 0 {
+		writeJSON(w, http.StatusOK, []Post{})
+		return
+	}
+
+	var posts []Post
+	if err := db.Where("id IN ?", postIDs).Order("created_at desc").Find(&posts).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "收藏帖子读取失败")
+		return
+	}
+
+	for i := 0; i < len(posts); i++ {
+		enrichPostForResponse(&posts[i], user, true)
+	}
+
+	writeJSON(w, http.StatusOK, posts)
+}
+
+// ---------------------------------------------------------
+// 14. 删除评论接口
 // ---------------------------------------------------------
 func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
@@ -657,4 +755,208 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "评论已删除"})
+}
+
+// ---------------------------------------------------------
+// 15. 找回账号接口：邮箱 + 验证码换回用户名
+// ---------------------------------------------------------
+func handleRecoverAccount(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	var req struct {
+		Email string `json:"email"`
+		Code  string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "数据格式不对")
+		return
+	}
+
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	code := strings.TrimSpace(req.Code)
+	if email == "" || code == "" {
+		writeError(w, http.StatusBadRequest, "邮箱和验证码不能为空")
+		return
+	}
+
+	if ok, message := verifyEmailCode(email, code); !ok {
+		writeError(w, http.StatusUnauthorized, message)
+		return
+	}
+
+	var user User
+	if err := db.Where("email = ?", email).First(&user).Error; err != nil {
+		writeError(w, http.StatusNotFound, "没有找到绑定该邮箱的账号")
+		return
+	}
+
+	clearEmailCode(email)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message":  "账号找回成功",
+		"username": user.Username,
+	})
+}
+
+// ---------------------------------------------------------
+// 16. 重置密码接口：邮箱 + 验证码 + 新密码
+// ---------------------------------------------------------
+func handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	var req struct {
+		Email       string `json:"email"`
+		Code        string `json:"code"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "数据格式不对")
+		return
+	}
+
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	code := strings.TrimSpace(req.Code)
+	newPassword := strings.TrimSpace(req.NewPassword)
+	if email == "" || code == "" || newPassword == "" {
+		writeError(w, http.StatusBadRequest, "邮箱、验证码和新密码不能为空")
+		return
+	}
+	if len(newPassword) < 6 {
+		writeError(w, http.StatusBadRequest, "新密码至少需要 6 位")
+		return
+	}
+
+	if ok, message := verifyEmailCode(email, code); !ok {
+		writeError(w, http.StatusUnauthorized, message)
+		return
+	}
+
+	var user User
+	if err := db.Where("email = ?", email).First(&user).Error; err != nil {
+		writeError(w, http.StatusNotFound, "没有找到绑定该邮箱的账号")
+		return
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "新密码加密失败")
+		return
+	}
+
+	user.PasswordHash = string(hashedPassword)
+	if err := db.Save(&user).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "密码重置失败，数据库写入错误")
+		return
+	}
+
+	clearEmailCode(email)
+	writeJSON(w, http.StatusOK, map[string]string{"message": "密码已重置，请使用新密码登录"})
+}
+
+// ---------------------------------------------------------
+// 17. 超级管理员资料更新接口
+// ---------------------------------------------------------
+func handleUpdateAdminProfile(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	admin, ok := requireAdmin(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		Username        string `json:"username"`
+		Password        string `json:"password"`
+		Avatar          string `json:"avatar"`
+		Email           string `json:"email"`
+		CurrentPassword string `json:"current_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "数据格式不对")
+		return
+	}
+
+	newUsername := strings.TrimSpace(req.Username)
+	newPassword := strings.TrimSpace(req.Password)
+	newAvatar := strings.TrimSpace(req.Avatar)
+	newEmail := strings.ToLower(strings.TrimSpace(req.Email))
+	currentPassword := strings.TrimSpace(req.CurrentPassword)
+	if currentPassword == "" {
+		writeError(w, http.StatusForbidden, "修改管理员资料必须输入当前密码")
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(currentPassword)); err != nil {
+		writeError(w, http.StatusUnauthorized, "当前密码输入错误")
+		return
+	}
+
+	oldUsername := admin.Username
+	usernameChanged := false
+	if newUsername != "" && newUsername != admin.Username {
+		var existingUser User
+		if err := db.Where("username = ? AND uid <> ?", newUsername, admin.UID).First(&existingUser).Error; err == nil {
+			writeError(w, http.StatusBadRequest, "该管理员账号已被占用")
+			return
+		}
+		admin.Username = newUsername
+		admin.Nickname = newUsername
+		usernameChanged = true
+	}
+
+	if newEmail != "" && newEmail != admin.Email {
+		if !validateSupportedEmail(newEmail) {
+			writeError(w, http.StatusForbidden, "目前仅支持 QQ 或 Gmail 邮箱")
+			return
+		}
+		var existingUser User
+		if err := db.Where("email = ? AND uid <> ?", newEmail, admin.UID).First(&existingUser).Error; err == nil {
+			writeError(w, http.StatusBadRequest, "该邮箱已被其他账号绑定")
+			return
+		}
+		admin.Email = newEmail
+	}
+
+	if newAvatar != "" {
+		admin.Avatar = newAvatar
+	}
+
+	if newPassword != "" {
+		if len(newPassword) < 6 {
+			writeError(w, http.StatusBadRequest, "新密码至少需要 6 位")
+			return
+		}
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "新密码加密失败")
+			return
+		}
+		admin.PasswordHash = string(hashedPassword)
+	}
+
+	if err := db.Save(&admin).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "管理员资料保存失败")
+		return
+	}
+
+	if usernameChanged {
+		db.Model(&Post{}).Where("username = ?", oldUsername).Update("username", admin.Username)
+		db.Model(&Comment{}).Where("username = ?", oldUsername).Update("username", admin.Username)
+	}
+
+	token, err := generateToken(admin)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "登录凭证刷新失败")
+		return
+	}
+
+	payload := publicUserPayload(admin)
+	payload["email"] = admin.Email
+	payload["message"] = "管理员资料已更新"
+	payload["token"] = token
+	writeJSON(w, http.StatusOK, payload)
 }

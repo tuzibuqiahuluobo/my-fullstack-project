@@ -2,16 +2,17 @@
 
 > **语言：** [English](README.md) | 简体中文
 
-这是一个基于 Go 的轻量级 HTTP 后端，配合 Vue 3 前端使用。它提供注册、登录、资料修改、社区帖子、评论、收藏和管理员管理接口。
+这是一个基于 Go 的轻量级 HTTP 后端，配合 Vue 3 前端使用。它提供注册、登录、账号/密码找回、资料修改、社区帖子、帖子详情、评论、收藏和管理员管理接口。
 
 ## 功能特性
 
 - 用户注册：密码使用 bcrypt 加密，支持 QQ / Gmail 邮箱验证码。
 - 用户登录：登录成功后返回用户信息和 `token`。
+- 账号与密码找回：通过邮箱验证码找回账号或重置密码。
 - Token 鉴权：前端后续请求需要携带 `Authorization: Bearer <token>`。
 - 资料更新：支持修改昵称、头像、密码、登录账号；登录账号 180 天内只能修改一次。
-- 社区功能：发帖、获取帖子、评论、收藏、删除自己的帖子或评论。
-- 管理员功能：超级管理员可以查看用户列表、删除普通用户、删除任意帖子或评论。
+- 社区功能：发帖、获取帖子、帖子详情、评论、收藏、删除自己的帖子或评论。
+- 管理员功能：超级管理员可以查看用户列表、删除普通用户、修改管理员资料、删除任意帖子或评论。
 - SQLite 持久化：首次运行会自动创建 `data.db`。
 - 本地开发友好：CORS 默认允许所有来源，可通过环境变量收紧。
 
@@ -41,6 +42,8 @@ http://localhost:8080
 
 首次启动会在后端目录生成 `data.db`。这个文件是本地数据库，不应该提交到仓库。
 
+如果需要真实发送邮箱验证码，请先复制 `.env.example` 为 `.env`，然后把 `SMTP_PASS` 改成你自己的 QQ 邮箱授权码。
+
 ## 环境变量
 
 本项目默认能直接本地运行；如果准备部署或给别人访问，请务必配置下面这些环境变量。
@@ -49,9 +52,10 @@ http://localhost:8080
 |--------|--------|------|
 | `APP_TOKEN_SECRET` | `dev-only-change-me` | token 签名密钥；上线必须改成随机长字符串 |
 | `CORS_ALLOWED_ORIGIN` | `*` | 允许访问后端的前端来源；上线建议填真实前端域名 |
+| `SUPER_ADMIN_USERNAME` | `superadmin` | 超级管理员登录账号 |
 | `SUPER_ADMIN_EMAIL` | `2672172829@qq.com` | 首次启动自动创建的超级管理员邮箱 |
 | `SUPER_ADMIN_PASSWORD` | `ASDasd5201314.` | 首次启动自动创建的超级管理员密码；上线必须修改 |
-| `SMTP_USER` | 空 | 发验证码用的邮箱账号；为空时验证码会打印在后端控制台 |
+| `SMTP_USER` | `2672172829@qq.com` | 发验证码用的邮箱账号 |
 | `SMTP_PASS` | 空 | 邮箱授权码或密码 |
 | `SMTP_HOST` | `smtp.qq.com` | SMTP 服务器 |
 | `SMTP_PORT` | `587` | SMTP 端口 |
@@ -61,6 +65,7 @@ http://localhost:8080
 ```powershell
 $env:APP_TOKEN_SECRET="please-change-to-a-long-random-secret"
 $env:CORS_ALLOWED_ORIGIN="http://localhost:5173"
+$env:SUPER_ADMIN_USERNAME="superadmin"
 $env:SUPER_ADMIN_EMAIL="admin@example.com"
 $env:SUPER_ADMIN_PASSWORD="your-strong-password"
 go run .
@@ -89,9 +94,12 @@ Authorization: Bearer <token>
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST` | `/api/send-code` | 发送注册验证码 |
+| `POST` | `/api/recover-account` | 通过邮箱验证码找回账号 |
+| `POST` | `/api/reset-password` | 通过邮箱验证码重置密码 |
 | `POST` | `/api/register` | 注册用户 |
 | `POST` | `/api/login` | 登录并返回 token |
 | `GET` | `/api/posts` | 获取帖子列表；登录后会额外返回当前用户收藏状态 |
+| `GET` | `/api/post-detail?id=<id>` | 获取单条帖子详情、评论和收藏状态 |
 
 登录成功响应示例：
 
@@ -117,6 +125,7 @@ Authorization: Bearer <token>
 | `POST` | `/api/create-comment` | 发表评论 |
 | `POST` | `/api/delete-comment` | 删除自己的评论；管理员可删除任意评论 |
 | `POST` | `/api/toggle-favorite` | 收藏或取消收藏帖子 |
+| `GET` | `/api/my-favorites` | 获取当前用户收藏的帖子 |
 
 发帖请求示例：
 
@@ -133,6 +142,7 @@ curl -X POST http://localhost:8080/api/create-post \
 |------|------|------|
 | `GET` | `/api/users` | 获取全部用户 |
 | `POST` | `/api/delete-user` | 删除普通用户 |
+| `POST` | `/api/update-admin-profile` | 修改超级管理员账号、密码、头像或邮箱 |
 
 管理员接口同样使用 `Authorization: Bearer <token>`，后端会根据用户 `role` 判断是否为超级管理员。`role = 2` 表示超级管理员，`role = 0` 表示普通用户。
 
@@ -157,8 +167,22 @@ go test ./...
 
 - 本项目适合学习前后端分离、登录鉴权和基础 CRUD。
 - 默认管理员账号和默认 token 密钥只适合本地开发。
-- 上线前必须配置 `APP_TOKEN_SECRET`、`SUPER_ADMIN_EMAIL`、`SUPER_ADMIN_PASSWORD` 和 `CORS_ALLOWED_ORIGIN`。
+- 上线前必须配置 `APP_TOKEN_SECRET`、`SUPER_ADMIN_USERNAME`、`SUPER_ADMIN_EMAIL`、`SUPER_ADMIN_PASSWORD` 和 `CORS_ALLOWED_ORIGIN`。
 - 邮件服务未配置时，验证码会输出在后端控制台，方便本地调试。
+- CORS 已放到最外层中间件里，新接口的浏览器预检请求也会统一返回 CORS 响应头。
+
+## 修改超级管理员账号和密码
+
+开发阶段最简单的方式是在启动后端前设置环境变量：
+
+```powershell
+$env:SUPER_ADMIN_USERNAME="你想要的管理员账号"
+$env:SUPER_ADMIN_EMAIL="admin@example.com"
+$env:SUPER_ADMIN_PASSWORD="你想要的新密码"
+go run .
+```
+
+后端启动时会按 `SUPER_ADMIN_EMAIL` 找到超级管理员，并把登录账号、昵称、密码和 `role = 2` 同步好。也就是说，登录时填写的是 `SUPER_ADMIN_USERNAME`，不是邮箱。
 
 ## 许可证
 

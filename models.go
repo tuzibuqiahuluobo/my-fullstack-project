@@ -109,26 +109,32 @@ func initDB() {
 	// 同步表结构
 	db.AutoMigrate(&User{}, &Post{}, &Comment{}, &Favorite{})
 
-	// 这两个默认值只方便本地学习时快速启动项目。
-	// 如果要部署到公网，请务必通过环境变量设置自己的邮箱和强密码。
+	// 这三个默认值只方便本地学习时快速启动项目。
+	// 如果要部署到公网，请务必通过环境变量设置自己的账号、邮箱和强密码。
+	SuperAdminUsername := getEnv("SUPER_ADMIN_USERNAME", "superadmin")
 	SuperAdminEmail := getEnv("SUPER_ADMIN_EMAIL", "2672172829@qq.com")
 	SuperAdminPassword := getEnv("SUPER_ADMIN_PASSWORD", "ASDasd5201314.")
 
 	var superAdmin User
-	if result := db.Where("email = ?", SuperAdminEmail).First(&superAdmin); result.Error != nil {
+	if result := db.Where("role = ?", 2).First(&superAdmin); result.Error != nil {
 		hash, _ := bcrypt.GenerateFromPassword([]byte(SuperAdminPassword), bcrypt.DefaultCost)
 		db.Create(&User{
-			Username:     "超级管理员",
-			Nickname:     "超级管理员", // 新增
+			Username:     SuperAdminUsername,
+			Nickname:     SuperAdminUsername, // 新增
 			Email:        SuperAdminEmail,
 			PasswordHash: string(hash),
 			Role:         2,
 			Avatar:       "https://api.dicebear.com/7.x/adventurer/svg?seed=Admin",
 		})
 		fmt.Println("👑 超级管理员账号已自动生成！")
-	} else if superAdmin.Role != 2 {
+	} else {
+		// 已经存在超级管理员时，只修复权限和缺失头像，不覆盖后台里手动改过的账号、邮箱或密码。
+		// 如果想完全重置管理员，删除 data.db 后重新启动即可按环境变量重新生成。
 		superAdmin.Role = 2
+		if superAdmin.Avatar == "" {
+			superAdmin.Avatar = "https://api.dicebear.com/7.x/adventurer/svg?seed=Admin"
+		}
 		db.Save(&superAdmin)
-		fmt.Println("🛡️ 超级管理员权限已强制修复！")
+		fmt.Println("🛡️ 超级管理员权限已确认！")
 	}
 }

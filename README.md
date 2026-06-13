@@ -2,16 +2,17 @@
 
 > **Languages:** English | [简体中文](README.zh-CN.md)
 
-A lightweight Go HTTP backend for the Vue 3 frontend. It supports registration, login, profile updates, community posts, comments, favorites, and super-admin management.
+A lightweight Go HTTP backend for the Vue 3 frontend. It supports registration, login, account/password recovery, profile updates, community posts, post details, comments, favorites, and super-admin management.
 
 ## Features
 
 - Registration with bcrypt password hashing and QQ / Gmail email verification.
 - Login returns public user fields plus a `token`.
+- Account recovery and password reset through email verification codes.
 - Token authentication via `Authorization: Bearer <token>`.
 - Profile updates for nickname, avatar, password, and login username.
-- Community APIs for posts, comments, favorites, and deletion permissions.
-- Admin APIs for listing users, deleting normal users, and moderating posts/comments.
+- Community APIs for posts, post details, comments, favorites, and deletion permissions.
+- Admin APIs for listing users, deleting normal users, editing admin profile, and moderating posts/comments.
 - SQLite persistence with automatic migration.
 - Development-friendly CORS, configurable for production.
 
@@ -31,6 +32,8 @@ http://localhost:8080
 
 On first run, the backend creates a local `data.db` SQLite file.
 
+To send real verification emails, copy `.env.example` to `.env`, then fill `SMTP_PASS` with your QQ mail authorization code.
+
 ## Environment Variables
 
 The defaults are convenient for local learning. For deployment, configure these values explicitly.
@@ -39,9 +42,10 @@ The defaults are convenient for local learning. For deployment, configure these 
 |------|---------|---------|
 | `APP_TOKEN_SECRET` | `dev-only-change-me` | HMAC token signing secret; change this in production |
 | `CORS_ALLOWED_ORIGIN` | `*` | Allowed frontend origin; use your real frontend URL in production |
+| `SUPER_ADMIN_USERNAME` | `superadmin` | Login username for the initial super admin |
 | `SUPER_ADMIN_EMAIL` | `2672172829@qq.com` | Email for the initial super admin |
 | `SUPER_ADMIN_PASSWORD` | `ASDasd5201314.` | Password for the initial super admin; change this in production |
-| `SMTP_USER` | empty | Email account used to send verification codes |
+| `SMTP_USER` | `2672172829@qq.com` | Email account used to send verification codes |
 | `SMTP_PASS` | empty | SMTP password or authorization code |
 | `SMTP_HOST` | `smtp.qq.com` | SMTP host |
 | `SMTP_PORT` | `587` | SMTP port |
@@ -51,6 +55,7 @@ PowerShell example:
 ```powershell
 $env:APP_TOKEN_SECRET="please-change-to-a-long-random-secret"
 $env:CORS_ALLOWED_ORIGIN="http://localhost:5173"
+$env:SUPER_ADMIN_USERNAME="superadmin"
 $env:SUPER_ADMIN_EMAIL="admin@example.com"
 $env:SUPER_ADMIN_PASSWORD="your-strong-password"
 go run .
@@ -77,9 +82,12 @@ Authorization: Bearer <token>
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/send-code` | Send registration verification code |
+| `POST` | `/api/recover-account` | Recover username by email verification code |
+| `POST` | `/api/reset-password` | Reset password by email verification code |
 | `POST` | `/api/register` | Register a user |
 | `POST` | `/api/login` | Login and return token |
 | `GET` | `/api/posts` | List posts; logged-in users also receive favorite state |
+| `GET` | `/api/post-detail?id=<id>` | Read one post with comments and favorite state |
 
 ### Login Response Example
 
@@ -105,6 +113,7 @@ Authorization: Bearer <token>
 | `POST` | `/api/create-comment` | Create a comment |
 | `POST` | `/api/delete-comment` | Delete own comment; admins can delete any comment |
 | `POST` | `/api/toggle-favorite` | Favorite or unfavorite a post |
+| `GET` | `/api/my-favorites` | List current user's favorite posts |
 
 ### Requires Super Admin
 
@@ -112,6 +121,7 @@ Authorization: Bearer <token>
 |--------|------|-------------|
 | `GET` | `/api/users` | List all users |
 | `POST` | `/api/delete-user` | Delete a normal user |
+| `POST` | `/api/update-admin-profile` | Update super-admin username, password, avatar, or email |
 
 ## Tests
 
@@ -126,7 +136,21 @@ Tests use an in-memory SQLite database and do not touch the local `data.db`.
 
 - `role = 0` means normal user, `role = 2` means super admin.
 - If SMTP is not configured, verification codes are printed to the backend console for local development.
-- Change `APP_TOKEN_SECRET`, `SUPER_ADMIN_EMAIL`, `SUPER_ADMIN_PASSWORD`, and `CORS_ALLOWED_ORIGIN` before production deployment.
+- CORS is applied through a top-level middleware so browser preflight requests for new API routes also receive CORS headers.
+- Change `APP_TOKEN_SECRET`, `SUPER_ADMIN_USERNAME`, `SUPER_ADMIN_EMAIL`, `SUPER_ADMIN_PASSWORD`, and `CORS_ALLOWED_ORIGIN` before production deployment.
+
+## Changing the Super Admin Account
+
+For local development, set these variables before starting the backend:
+
+```powershell
+$env:SUPER_ADMIN_USERNAME="your-admin-username"
+$env:SUPER_ADMIN_EMAIL="admin@example.com"
+$env:SUPER_ADMIN_PASSWORD="your-new-password"
+go run .
+```
+
+The backend finds the super admin by `SUPER_ADMIN_EMAIL`, then syncs username, nickname, password, and `role = 2`. Login with `SUPER_ADMIN_USERNAME`, not the email address.
 
 ## License
 

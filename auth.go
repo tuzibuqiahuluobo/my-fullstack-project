@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -32,6 +33,19 @@ func setJSONHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", corsAllowedOrigin())
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 这里在最外层统一加 CORS 响应头，避免某个新接口漏掉 OPTIONS 处理后被浏览器拦截。
+		setJSONHeaders(w)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func handleOptions(w http.ResponseWriter, r *http.Request) bool {
@@ -72,6 +86,39 @@ func getEnv(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func loadDotEnv(path string) {
+	file, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+		if key == "" {
+			continue
+		}
+
+		// 只有系统环境变量里还没有这个 key 时，才读取 .env。
+		// 这样你临时在 PowerShell 里设置的环境变量优先级更高，方便调试。
+		if strings.TrimSpace(os.Getenv(key)) == "" {
+			os.Setenv(key, value)
+		}
+	}
 }
 
 func tokenSecret() []byte {
