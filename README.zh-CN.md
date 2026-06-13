@@ -2,390 +2,163 @@
 
 > **语言：** [English](README.md) | 简体中文
 
-基于 Go 的轻量级 HTTP 后端，提供用户注册、登录与资料更新 API。
+这是一个基于 Go 的轻量级 HTTP 后端，配合 Vue 3 前端使用。它提供注册、登录、资料修改、社区帖子、评论、收藏和管理员管理接口。
 
 ## 功能特性
 
-- 用户注册，密码使用 bcrypt 加密存储，支持邮箱验证（QQ & Gmail）
-- 用户登录（返回 `uid`, `avatar`, `username`, `nickname`）
-- 资料更新（用户名、头像、密码、昵称 — 各字段可选更新，用户名更新有 180 天时间限制）
-- 帖子管理（发布、获取全部、作者或管理员删除）
-- 用户管理（获取全部用户、管理员强制注销用户）
-- 注册时自动生成默认昵称和头像
-- 首次运行时自动创建超级管理员账户（如果不存在）
+- 用户注册：密码使用 bcrypt 加密，支持 QQ / Gmail 邮箱验证码。
+- 用户登录：登录成功后返回用户信息和 `token`。
+- Token 鉴权：前端后续请求需要携带 `Authorization: Bearer <token>`。
+- 资料更新：支持修改昵称、头像、密码、登录账号；登录账号 180 天内只能修改一次。
+- 社区功能：发帖、获取帖子、评论、收藏、删除自己的帖子或评论。
+- 管理员功能：超级管理员可以查看用户列表、删除普通用户、删除任意帖子或评论。
+- SQLite 持久化：首次运行会自动创建 `data.db`。
+- 本地开发友好：CORS 默认允许所有来源，可通过环境变量收紧。
 
 ## 技术栈
 
 | 依赖 | 用途 |
 |------|------|
-| [Go](https://go.dev/) 1.26.4+ | 运行时 |
-| `net/http` | HTTP 服务器与路由 |
-| [GORM](https://gorm.io/) | ORM 与数据库迁移 |
-| [glebarez/sqlite](https://github.com/glebarez/sqlite) | 纯 Go SQLite 驱动（无需 CGO） |
-| [golang.org/x/crypto/bcrypt](https://pkg.go.dev/golang.org/x/crypto/bcrypt) | 密码哈希 |
+| Go 1.26.4+ | 后端运行时 |
+| `net/http` | HTTP 服务和路由 |
+| GORM | ORM 和自动迁移 |
+| `glebarez/sqlite` | 纯 Go SQLite 驱动 |
+| `golang.org/x/crypto/bcrypt` | 密码哈希 |
 
 ## 快速开始
 
-### 环境要求
-
-- Go 1.26.4 或更高版本
-
-### 安装与运行
-
 ```bash
-git clone https://github.com/tuzibuqiahuluobo/my-fullstack-project
-cd my-fullstack-project
+cd my-backend
 go mod download
-go run main.go
+go run .
 ```
 
-服务器在 `http://localhost:8080` 启动，控制台会输出：
+服务默认运行在：
 
-```
-🚀 服务器已启动！运行在 http://localhost:8080
-```
-
-首次运行时，会在项目根目录自动创建 `data.db` SQLite 数据库文件。
-
-## 数据模型
-
-`models.go` 中的 `User` 结构体：
-
-| 字段 | 类型 | 说明 |
-|-------|------|-------------|
-| `uid` | uint | 主键，自增 |
-| `username` | string | 唯一用户名 |
-| `password_hash` | string | bcrypt 哈希（不通过 API 暴露） |
-| `avatar` | string | 头像 URL，未提供时由 DiceBear 自动生成 |
-| `email` | string | 用户邮箱，用于注册和验证 |
-| `role` | int | 用户角色 (0: 普通用户, 2: 超级管理员) |
-| `username_updated_at` | time.Time | 上次修改用户名的时间戳（180 天内限制修改一次） |
-| `nickname` | string | 用户显示昵称，默认为 `user_{UID}` |
-
-`models.go` 中的 `Post` 结构体：
-
-| 字段 | 类型 | 说明 |
-|-------|------|-------------|
-| `id` | uint | 主键，自增 |
-| `username` | string | 帖子作者的用户名 |
-| `nickname` | string | 帖子作者的昵称（创建时缓存） |
-| `avatar` | string | 帖子作者的头像 URL（创建时缓存） |
-| `content` | string | 帖子内容 |
-| `created_at` | time.Time | 帖子创建时间戳 |
-## API 文档
-
-所有接口均使用 `POST` 请求，`Content-Type: application/json`。已开启 CORS（`Access-Control-Allow-Origin: *`）。
-
-### 注册
-
-**`POST /api/register`**
-
-请求体：
-
-```json
-{
-  "username": "alice",
-  "password": "secret123",
-  "email": "test@qq.com",
-  "code": "123456"
-}
+```text
+http://localhost:8080
 ```
 
-成功响应（`200`）：
+首次启动会在后端目录生成 `data.db`。这个文件是本地数据库，不应该提交到仓库。
 
-```json
-{"message": "注册成功！欢迎加入。"}
+## 环境变量
+
+本项目默认能直接本地运行；如果准备部署或给别人访问，请务必配置下面这些环境变量。
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `APP_TOKEN_SECRET` | `dev-only-change-me` | token 签名密钥；上线必须改成随机长字符串 |
+| `CORS_ALLOWED_ORIGIN` | `*` | 允许访问后端的前端来源；上线建议填真实前端域名 |
+| `SUPER_ADMIN_EMAIL` | `2672172829@qq.com` | 首次启动自动创建的超级管理员邮箱 |
+| `SUPER_ADMIN_PASSWORD` | `ASDasd5201314.` | 首次启动自动创建的超级管理员密码；上线必须修改 |
+| `SMTP_USER` | 空 | 发验证码用的邮箱账号；为空时验证码会打印在后端控制台 |
+| `SMTP_PASS` | 空 | 邮箱授权码或密码 |
+| `SMTP_HOST` | `smtp.qq.com` | SMTP 服务器 |
+| `SMTP_PORT` | `587` | SMTP 端口 |
+
+示例：
+
+```powershell
+$env:APP_TOKEN_SECRET="please-change-to-a-long-random-secret"
+$env:CORS_ALLOWED_ORIGIN="http://localhost:5173"
+$env:SUPER_ADMIN_EMAIL="admin@example.com"
+$env:SUPER_ADMIN_PASSWORD="your-strong-password"
+go run .
 ```
 
-错误响应：
+## 鉴权说明
 
-- `400` — JSON 格式错误，用户名或邮箱已被注册
-- `401` — 验证码已过期或错误
-- `500` — 密码哈希失败
+登录成功后，后端会返回一个自定义 HMAC token。它不是标准 JWT，结构大致是：
 
-```bash
-curl -X POST http://localhost:8080/api/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","password":"secret123","email":"test@qq.com","code":"123456"}'
+```text
+base64(payload).signature
 ```
 
-### 登录
+`payload` 只保存用户 UID 和过期时间，`signature` 用 `APP_TOKEN_SECRET` 计算。后端收到请求后会重新计算签名，如果签名不一致或 token 过期，就拒绝请求。
 
-**`POST /api/login`**
+需要登录的接口必须携带请求头：
 
-请求体：
-
-```json
-{
-  "username": "alice",
-  "password": "secret123"
-}
+```text
+Authorization: Bearer <token>
 ```
 
-成功响应（`200`）：
+## 主要 API
+
+### 公开接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/send-code` | 发送注册验证码 |
+| `POST` | `/api/register` | 注册用户 |
+| `POST` | `/api/login` | 登录并返回 token |
+| `GET` | `/api/posts` | 获取帖子列表；登录后会额外返回当前用户收藏状态 |
+
+登录成功响应示例：
 
 ```json
 {
   "message": "登录成功！欢迎回来，alice",
   "uid": 1,
+  "username": "alice",
+  "nickname": "user_1",
   "avatar": "https://api.dicebear.com/7.x/adventurer/svg?seed=user_1",
-  "username": "alice",
-  "nickname": "user_1"
+  "role": 0,
+  "token": "base64payload.signature"
 }
 ```
 
-错误响应（`401`）：
+### 需要登录的接口
 
-- 用户名不存在
-- 密码错误
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/update` | 修改当前登录用户资料 |
+| `POST` | `/api/create-post` | 发布帖子 |
+| `POST` | `/api/delete-post` | 删除自己的帖子；管理员可删除任意帖子 |
+| `POST` | `/api/create-comment` | 发表评论 |
+| `POST` | `/api/delete-comment` | 删除自己的评论；管理员可删除任意评论 |
+| `POST` | `/api/toggle-favorite` | 收藏或取消收藏帖子 |
 
-```bash
-curl -X POST http://localhost:8080/api/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","password":"secret123"}'
-```
-
-### 更新资料
-
-**`POST /api/update`**
-
-请求体：
-
-```json
-{
-  "uid": 1,
-  "username": "alice_new",
-  "avatar": "https://example.com/avatar.png",
-  "password": "newpassword",
-  "nickname": "爱丽丝仙境",
-  "current_password": "secret123" 
-}
-```
-
-`username`、`avatar`、`password`、`nickname` 均为可选字段。修改 `username` 时必须提供 `current_password`，且 180 天内仅可修改一次。
-
-成功响应（`200`）：
-
-```json
-{"message": "资料更新成功！核心凭证已同步。"}
-```
-
-错误响应：
-
-- `400` — JSON 格式错误，用户名已被占用
-- `401` — 安全验证失败（当前密码错误）
-- `403` — 用户名更新受限（180 天），或权限不足
-- `404` — 找不到该用户
-- `500` — 更新失败（数据库错误，密码哈希错误）
-
-```bash
-curl -X POST http://localhost:8080/api/update \
-  -H "Content-Type: application/json" \
-  -d '{"uid":1,"nickname":"爱丽丝仙境","current_password":"secret123"}'
-```
-
-### 发送验证码
-
-**`POST /api/send-code`**
-
-请求体：
-
-```json
-{
-  "email": "test@qq.com"
-}
-```
-
-成功响应（`200`）：
-
-```json
-{"message": "验证码发送成功，请注意查收！"}
-```
-
-错误响应：
-
-- `400` — JSON 格式错误或不支持的邮箱域名（仅支持 QQ 和 Gmail）
-- `500` — 邮件发送失败
-
-```bash
-curl -X POST http://localhost:8080/api/send-code \
-  -H "Content-Type: application/json" \
-  -d '{"email":"test@qq.com"}'
-```
-
-### 获取所有帖子
-
-**`GET /api/posts`**
-
-无请求体。
-
-成功响应（`200`）：
-
-```json
-[
-  {
-    "id": 1,
-    "username": "alice",
-    "nickname": "爱丽丝仙境",
-    "avatar": "https://example.com/avatar.png",
-    "content": "你好，世界！",
-    "created_at": "2023-10-27T10:00:00Z"
-  }
-]
-```
-
-错误响应：
-
-- `500` — 数据库错误
-
-```bash
-curl http://localhost:8080/api/posts
-```
-
-### 发布帖子
-
-**`POST /api/create-post`**
-
-请求体：
-
-```json
-{
-  "username": "alice",
-  "nickname": "爱丽丝仙境",
-  "avatar": "https://example.com/avatar.png",
-  "content": "这是一篇新帖子。"
-}
-```
-
-成功响应（`200`）：
-
-```json
-{"message": "发布成功！"}
-```
-
-错误响应：
-
-- `400` — JSON 格式错误或内容为空
-- `500` — 数据库错误
+发帖请求示例：
 
 ```bash
 curl -X POST http://localhost:8080/api/create-post \
   -H "Content-Type: application/json" \
-  -d '{"username":"alice","nickname":"爱丽丝仙境","avatar":"https://example.com/avatar.png","content":"这是一篇新帖子。"}'
+  -H "Authorization: Bearer <token>" \
+  -d '{"content":"这是一条新帖子"}'
 ```
 
-### 删除帖子
+### 需要超级管理员的接口
 
-**`POST /api/delete-post`**
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/users` | 获取全部用户 |
+| `POST` | `/api/delete-user` | 删除普通用户 |
 
-请求体：
+管理员接口同样使用 `Authorization: Bearer <token>`，后端会根据用户 `role` 判断是否为超级管理员。`role = 2` 表示超级管理员，`role = 0` 表示普通用户。
 
-```json
-{
-  "post_id": 1,
-  "username": "alice"
-}
+## 数据模型简述
+
+- `User`：用户账号、邮箱、头像、昵称、角色、密码哈希。
+- `Post`：帖子内容、作者账号、作者昵称和头像快照。
+- `Comment`：评论内容、所属帖子、评论者信息。
+- `Favorite`：用户和帖子的收藏关系，使用联合主键避免重复收藏。
+- `VerifyCode`：保存在内存中的临时验证码，默认 5 分钟过期。
+
+## 测试
+
+```powershell
+$env:GOCACHE='G:\newproject\.tmp\gocache'
+go test ./...
 ```
 
-成功响应（`200`）：
+测试使用内存 SQLite，不会读取或修改项目里的 `data.db`。
 
-```json
-{"message": "帖子已永久销毁"}
-```
+## 开发提醒
 
-错误响应：
-
-- `400` — JSON 格式错误
-- `403` — 无权操作（只有帖子作者或“超级管理员”可以删除）
-- `404` — 帖子未找到
-- `500` — 数据库错误
-
-```bash
-curl -X POST http://localhost:8080/api/delete-post \
-  -H "Content-Type: application/json" \
-  -d '{"post_id":1,"username":"alice"}'
-```
-
-### 获取所有用户 (仅管理员)
-
-**`GET /api/users?admin=超级管理员`**
-
-无请求体。需要 `admin=超级管理员` 查询参数进行授权。
-
-成功响应（`200`）：
-
-```json
-[
-  {
-    "uid": 1,
-    "username": "alice",
-    "avatar": "https://example.com/avatar.png",
-    "email": "test@qq.com",
-    "role": 0,
-    "username_updated_at": "2023-10-27T10:00:00Z",
-    "nickname": "爱丽丝仙境"
-  }
-]
-```
-
-错误响应：
-
-- `403` — 未授权（非“超级管理员”）
-- `500` — 数据库错误
-
-```bash
-curl "http://localhost:8080/api/users?admin=超级管理员"
-```
-
-### 删除用户 (仅管理员)
-
-**`POST /api/delete-user`**
-
-请求体：
-
-```json
-{
-  "admin_name": "超级管理员",
-  "target_uid": 2
-}
-```
-
-成功响应（`200`）：
-
-```json
-{"message": "该用户已被强制剥夺权限并注销账号"}
-```
-
-错误响应：
-
-- `400` — JSON 格式错误
-- `403` — 未授权（非“超级管理员”）
-- `500` — 数据库错误
-
-```bash
-curl -X POST http://localhost:8080/api/delete-user \
-  -H "Content-Type: application/json" \
-  -d '{"admin_name":"超级管理员","target_uid":2}'
-```
-
-## 项目结构
-
-```
-my-backend/
-├── main.go          # 入口：路由、处理器、数据库初始化
-├── go.mod
-├── go.sum
-├── data.db          # 运行时生成（已 gitignore）
-├── README.md        # 英文（默认）
-└── README.zh-CN.md  # 中文
-```
-
-## 开发说明
-
-- `data.db` 已加入 `.gitignore`，不会提交到 Git。克隆仓库后需本地运行服务以生成数据库。
-- 当前未实现 JWT 或 Session 机制。登录成功后，前端应自行保存 `uid`、`username`、`nickname` 和 `avatar` 等字段。
-- CORS 设置为 `*`，便于本地开发，生产环境建议收紧。
-- 首次运行时，如果不存在，会自动创建超级管理员账户（“超级管理员”，默认密码为 “ASDasd5201314.”，可在 `models.go` 中修改），其角色为 `2`。您可以使用此账户进行管理员 API 测试。
+- 本项目适合学习前后端分离、登录鉴权和基础 CRUD。
+- 默认管理员账号和默认 token 密钥只适合本地开发。
+- 上线前必须配置 `APP_TOKEN_SECRET`、`SUPER_ADMIN_EMAIL`、`SUPER_ADMIN_PASSWORD` 和 `CORS_ALLOWED_ORIGIN`。
+- 邮件服务未配置时，验证码会输出在后端控制台，方便本地调试。
 
 ## 许可证
 
@@ -393,4 +166,4 @@ my-backend/
 
 ## AI 撰写声明
 
-本项目约有 70% 的代码由 AI 撰写。
+本项目约有 70% 的代码由 AI 协助撰写。

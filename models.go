@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -14,6 +15,7 @@ import (
 // ---------------------------------------------------------
 var db *gorm.DB                                // 全局数据库实例
 var emailCodeMap = make(map[string]VerifyCode) // 验证码临时记事本
+var emailCodeMu sync.Mutex                     // net/http 会并发处理请求，map 需要加锁保护
 
 // ---------------------------------------------------------
 // 2. 核心图纸区（所有的数据结构）
@@ -36,6 +38,11 @@ type Post struct {
 	Avatar    string    `json:"avatar"`
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
+
+	// 【虚拟字段】打上 gorm:"-" 标签，代表不存入帖子表，仅用于动态计算并传给前端
+	Comments      []Comment `json:"comments" gorm:"-"`
+	FavoriteCount int64     `json:"favorite_count" gorm:"-"`
+	IsFavorited   bool      `json:"is_favorited" gorm:"-"`
 }
 
 type VerifyCode struct {
@@ -65,9 +72,26 @@ type UpdateRequest struct {
 
 type CreatePostRequest struct {
 	Username string `json:"username"`
-	Nickname string `json:"nickname"` // ✨【新增】接收前端传来的昵称
+	Nickname string `json:"nickname"` // 接收前端传来的昵称
 	Avatar   string `json:"avatar"`
 	Content  string `json:"content"`
+}
+
+// 评论表
+type Comment struct {
+	ID        uint      `json:"id" gorm:"primaryKey"`
+	PostID    uint      `json:"post_id" gorm:"index"` // 建立索引提升查询性能
+	Username  string    `json:"username"`             // 评论人账号
+	Nickname  string    `json:"nickname"`             // 评论人昵称
+	Avatar    string    `json:"avatar"`               // 评论人头像
+	Content   string    `json:"content"`              // 评论内容
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// 收藏表 (联合主键，防止重复收藏)
+type Favorite struct {
+	UID    uint `gorm:"primaryKey"`
+	PostID uint `gorm:"primaryKey"`
 }
 
 // ---------------------------------------------------------
@@ -83,10 +107,12 @@ func initDB() {
 	}
 
 	// 同步表结构
-	db.AutoMigrate(&User{}, &Post{})
+	db.AutoMigrate(&User{}, &Post{}, &Comment{}, &Favorite{})
 
-	SuperAdminEmail := "2672172829@qq.com"
-	SuperAdminPassword := "ASDasd5201314."
+	// 这两个默认值只方便本地学习时快速启动项目。
+	// 如果要部署到公网，请务必通过环境变量设置自己的邮箱和强密码。
+	SuperAdminEmail := getEnv("SUPER_ADMIN_EMAIL", "2672172829@qq.com")
+	SuperAdminPassword := getEnv("SUPER_ADMIN_PASSWORD", "ASDasd5201314.")
 
 	var superAdmin User
 	if result := db.Where("email = ?", SuperAdminEmail).First(&superAdmin); result.Error != nil {

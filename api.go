@@ -1,9 +1,10 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"math/rand"
+	"math/big"
 	"net/http"
 	"net/smtp"
 	"strings"
@@ -12,43 +13,92 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+func publicUserPayload(user User) map[string]interface{} {
+	return map[string]interface{}{
+		"uid":      user.UID,
+		"username": user.Username,
+		"nickname": user.Nickname,
+		"avatar":   user.Avatar,
+		"role":     user.Role,
+	}
+}
+
+func saveEmailCode(email string, code string) {
+	emailCodeMu.Lock()
+	defer emailCodeMu.Unlock()
+
+	emailCodeMap[email] = VerifyCode{
+		Code:      code,
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+}
+
+func generateVerifyCode() (string, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(900000))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%06d", n.Int64()+100000), nil
+}
+
 // ---------------------------------------------------------
 // 1. 注册接口
 // ---------------------------------------------------------
 func handleRegister(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-	if r.Method == "OPTIONS" {
+	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
 
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error": "数据格式不对"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "数据格式不对")
 		return
 	}
 
-	// 核对邮箱验证码
+	req.Username = strings.TrimSpace(req.Username)
+	req.Password = strings.TrimSpace(req.Password)
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	req.Code = strings.TrimSpace(req.Code)
+
+	if req.Username == "" || req.Password == "" || req.Email == "" || req.Code == "" {
+		writeError(w, http.StatusBadRequest, "用户名、密码、邮箱和验证码都不能为空")
+		return
+	}
+	if len(req.Password) < 6 {
+		writeError(w, http.StatusBadRequest, "密码至少需要 6 位")
+		return
+	}
+
+	var existingUser User
+	// 先用代码检查用户名或邮箱是否已存在，避免依赖数据库唯一索引。
+	// 这样即使你的旧 data.db 里已经有重复邮箱，启动迁移也不会失败。
+	if err := db.Where("username = ? OR email = ?", req.Username, req.Email).First(&existingUser).Error; err == nil {
+		writeError(w, http.StatusBadRequest, "该用户名或邮箱已被注册")
+		return
+	}
+
+	emailCodeMu.Lock()
 	savedData, exists := emailCodeMap[req.Email]
+	emailCodeMu.Unlock()
 	if !exists {
-		http.Error(w, `{"error": "请先获取验证码"}`, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "请先获取验证码")
 		return
 	}
 	if time.Now().After(savedData.ExpiresAt) {
+		emailCodeMu.Lock()
 		delete(emailCodeMap, req.Email)
-		http.Error(w, `{"error": "验证码已过期 (5分钟)，请重新发送"}`, http.StatusUnauthorized)
+		emailCodeMu.Unlock()
+		writeError(w, http.StatusUnauthorized, "验证码已过期 (5分钟)，请重新发送")
 		return
 	}
 	if savedData.Code != req.Code {
-		http.Error(w, `{"error": "验证码错误"}`, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "验证码错误")
 		return
 	}
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		http.Error(w, `{"error": "密码加密失败"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "密码加密失败")
 		return
 	}
 
@@ -57,169 +107,185 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		PasswordHash:      string(hashedPassword),
 		Email:             req.Email,
 		Role:              0,
-		UsernameUpdatedAt: time.Now(), // 初始注册视为一次修改，开始计算180天
+		UsernameUpdatedAt: time.Now(),
 	}
 
-	result := db.Create(&newUser)
-	if result.Error != nil {
-		http.Error(w, `{"error": "该用户名或邮箱已被注册"}`, http.StatusBadRequest)
+	if result := db.Create(&newUser); result.Error != nil {
+		writeError(w, http.StatusBadRequest, "该用户名或邮箱已被注册")
 		return
 	}
 
-	// ✨【核心新增】生成默认昵称：user_ + 刚刚生成的自增 UID
 	newUser.Nickname = fmt.Sprintf("user_%d", newUser.UID)
-	// 如果用户没有设置头像，顺手给他一个根据UID生成的漂亮默认头像
-	if newUser.Avatar == "" {
-		newUser.Avatar = fmt.Sprintf("https://api.dicebear.com/7.x/adventurer/svg?seed=user_%d", newUser.UID)
+	newUser.Avatar = fmt.Sprintf("https://api.dicebear.com/7.x/adventurer/svg?seed=user_%d", newUser.UID)
+	if result := db.Save(&newUser); result.Error != nil {
+		writeError(w, http.StatusInternalServerError, "默认资料保存失败")
+		return
 	}
-	db.Save(&newUser) // 将昵称和头像再次同步回数据库
 
+	emailCodeMu.Lock()
 	delete(emailCodeMap, req.Email)
-	fmt.Fprintf(w, `{"message": "注册成功！欢迎加入。"}`)
+	emailCodeMu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "注册成功！欢迎加入。"})
 }
 
 // ---------------------------------------------------------
 // 2. 登录接口
 // ---------------------------------------------------------
 func handleLogin(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-	if r.Method == "OPTIONS" {
+	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
 
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error": "数据格式不对"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "数据格式不对")
+		return
+	}
+
+	req.Username = strings.TrimSpace(req.Username)
+	req.Password = strings.TrimSpace(req.Password)
+	if req.Username == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "用户名和密码不能为空")
 		return
 	}
 
 	var user User
-	result := db.Where("username = ?", req.Username).First(&user)
-	if result.Error != nil {
-		http.Error(w, `{"error": "用户名不存在"}`, http.StatusUnauthorized)
+	if result := db.Where("username = ?", req.Username).First(&user); result.Error != nil {
+		writeError(w, http.StatusUnauthorized, "用户名不存在")
 		return
 	}
 
-	err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password))
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+		writeError(w, http.StatusUnauthorized, "密码错误")
+		return
+	}
+
+	token, err := generateToken(user)
 	if err != nil {
-		http.Error(w, `{"error": "密码错误"}`, http.StatusUnauthorized)
+		writeError(w, http.StatusInternalServerError, "登录凭证生成失败")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message":  "登录成功！欢迎回来，" + user.Username,
-		"uid":      user.UID,
-		"avatar":   user.Avatar,
-		"username": user.Username, // 把原用户名传回去备用
-		"nickname": user.Nickname, // 【新增】把新的昵称发给前端
-	})
+	payload := publicUserPayload(user)
+	payload["message"] = "登录成功！欢迎回来，" + user.Username
+	payload["token"] = token
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // ---------------------------------------------------------
 // 3. 修改资料接口
 // ---------------------------------------------------------
 func handleUpdate(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 
-	if r.Method == "OPTIONS" {
+	loginUser, ok := requireUser(w, r)
+	if !ok {
 		return
 	}
 
 	var req UpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error": "数据格式不对"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "数据格式不对")
 		return
 	}
 
 	var user User
-	if result := db.First(&user, req.UID); result.Error != nil {
-		http.Error(w, `{"error": "找不到该用户"}`, http.StatusNotFound)
+	if result := db.First(&user, loginUser.UID); result.Error != nil {
+		writeError(w, http.StatusNotFound, "找不到该用户")
 		return
 	}
-	// =========================================================
-	// 基础资料 (允许随时修改)
-	// =========================================================
-	if req.Nickname != "" {
-		user.Nickname = req.Nickname // 【新增】接收并修改昵称
-	}
-	if req.Avatar != "" {
-		user.Avatar = req.Avatar
-	}
-	// =========================================================
-	// 核心凭证 (不允许随时修改)
-	// =========================================================
-	// 1. 核对新老用户名
-	if req.Username != "" && req.Username != user.Username {
-		if req.CurrentPassword == "" {
-			http.Error(w, `{"error": "拒绝执行：修改登录账号必须输入当前密码进行安全验证！"}`, http.StatusForbidden)
-			return
-		}
-		// 用 bcrypt 比对当前输入的密码和数据库的哈希值
-		err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.CurrentPassword))
-		if err != nil {
-			http.Error(w, `{"error": "安全验证失败：当前密码输入错误，无权更改账号！"}`, http.StatusUnauthorized)
-			return
-		}
-		timeLimit := 60 * 24 * time.Hour
-		durationSinceUpdate := time.Since(user.UsernameUpdatedAt)
 
+	oldUsername := user.Username
+	newNickname := strings.TrimSpace(req.Nickname)
+	newAvatar := strings.TrimSpace(req.Avatar)
+	newUsername := strings.TrimSpace(req.Username)
+	newPassword := strings.TrimSpace(req.Password)
+	currentPassword := strings.TrimSpace(req.CurrentPassword)
+	usernameChanged := false
+
+	if newNickname != "" {
+		user.Nickname = newNickname
+	}
+	if newAvatar != "" {
+		user.Avatar = newAvatar
+	}
+
+	if newUsername != "" && newUsername != user.Username {
+		if currentPassword == "" {
+			writeError(w, http.StatusForbidden, "修改登录账号必须输入当前密码进行安全验证")
+			return
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
+			writeError(w, http.StatusUnauthorized, "当前密码输入错误，无权更改账号")
+			return
+		}
+
+		timeLimit := 180 * 24 * time.Hour
+		durationSinceUpdate := time.Since(user.UsernameUpdatedAt)
 		if durationSinceUpdate < timeLimit {
-			// 计算还剩多少天解锁
 			remaining := timeLimit - durationSinceUpdate
 			remainingDays := int(remaining.Hours() / 24)
 			if remainingDays == 0 {
-				remainingDays = 1 // 不足一天按一天算
+				remainingDays = 1
 			}
-			http.Error(w, fmt.Sprintf(`{"error": "安全锁定中：登录账号每 180 天仅可修改一次！距离下次解锁还剩 %d 天"}`, remainingDays), http.StatusForbidden)
+			writeError(w, http.StatusForbidden, fmt.Sprintf("登录账号每 180 天仅可修改一次，距离下次解锁还剩 %d 天", remainingDays))
 			return
 		}
 
 		var existingUser User
-		if err := db.Where("username = ?", req.Username).First(&existingUser).Error; err == nil {
-			http.Error(w, `{"error": "变更失败：该用户名已被他人占用，请换一个名字"}`, http.StatusBadRequest)
+		if err := db.Where("username = ?", newUsername).First(&existingUser).Error; err == nil {
+			writeError(w, http.StatusBadRequest, "该用户名已被他人占用，请换一个名字")
 			return
 		}
-		user.Username = req.Username
+
+		user.Username = newUsername
 		user.UsernameUpdatedAt = time.Now()
+		usernameChanged = true
 	}
-	// 2. 如果前端传来了【新密码】
-	if req.Password != "" {
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+
+	if newPassword != "" {
+		if len(newPassword) < 6 {
+			writeError(w, http.StatusBadRequest, "新密码至少需要 6 位")
+			return
+		}
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 		if err != nil {
-			http.Error(w, `{"error": "新密码加密失败"}`, http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "新密码加密失败")
 			return
 		}
 		user.PasswordHash = string(hashedPassword)
 	}
-	// =========================================================
-	// 数据同步归仓
-	// =========================================================
+
 	if result := db.Save(&user); result.Error != nil {
-		http.Error(w, `{"error": "保存失败，数据库写入错误"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "保存失败，数据库写入错误")
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "资料更新成功！核心凭证已同步。",
-	})
-	fmt.Fprintf(w, `{"message": "资料更新成功！"}`)
+	if usernameChanged {
+		db.Model(&Post{}).Where("username = ?", oldUsername).Update("username", user.Username)
+		db.Model(&Comment{}).Where("username = ?", oldUsername).Update("username", user.Username)
+	}
+
+	token, err := generateToken(user)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "登录凭证刷新失败")
+		return
+	}
+
+	payload := publicUserPayload(user)
+	payload["message"] = "资料更新成功！"
+	payload["token"] = token
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // ---------------------------------------------------------
 // 4. 发送验证码接口
 // ---------------------------------------------------------
 func handleSendCode(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-	if r.Method == "OPTIONS" {
+	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
 
@@ -227,22 +293,35 @@ func handleSendCode(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error": "数据格式错误"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "数据格式错误")
 		return
 	}
 
-	email := strings.ToLower(req.Email)
+	email := strings.ToLower(strings.TrimSpace(req.Email))
 	if !strings.HasSuffix(email, "@qq.com") && !strings.HasSuffix(email, "@gmail.com") {
-		http.Error(w, `{"error": "抱歉，目前仅支持 QQ 或 Gmail 邮箱注册！"}`, http.StatusForbidden)
+		writeError(w, http.StatusForbidden, "抱歉，目前仅支持 QQ 或 Gmail 邮箱注册")
 		return
 	}
 
-	code := fmt.Sprintf("%06d", rand.Intn(900000)+100000)
+	code, err := generateVerifyCode()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "验证码生成失败")
+		return
+	}
 
-	senderEmail := "2672172829@qq.com"
-	senderAuthCode := "soxouqzypsdbdjee"
-	smtpHost := "smtp.qq.com"
-	smtpPort := "587"
+	senderEmail := getEnv("SMTP_USER", "")
+	senderAuthCode := getEnv("SMTP_PASS", "")
+	smtpHost := getEnv("SMTP_HOST", "smtp.qq.com")
+	smtpPort := getEnv("SMTP_PORT", "587")
+
+	if senderEmail == "" || senderAuthCode == "" {
+		saveEmailCode(email, code)
+		fmt.Println("开发模式验证码:", email, code)
+		writeJSON(w, http.StatusOK, map[string]string{
+			"message": "邮件服务未配置，开发验证码已输出到后端控制台",
+		})
+		return
+	}
 
 	message := []byte("From: <" + senderEmail + ">\r\n" +
 		"To: " + email + "\r\n" +
@@ -251,205 +330,331 @@ func handleSendCode(w http.ResponseWriter, r *http.Request) {
 		"欢迎注册开发者中心！您的验证码是：" + code + "。请勿将此验证码泄露给他人。")
 
 	auth := smtp.PlainAuth("", senderEmail, senderAuthCode, smtpHost)
-	err := smtp.SendMail(smtpHost+":"+smtpPort, auth, senderEmail, []string{email}, message)
-	if err != nil {
+	if err := smtp.SendMail(smtpHost+":"+smtpPort, auth, senderEmail, []string{email}, message); err != nil {
 		fmt.Println("邮件发送失败:", err)
-		http.Error(w, `{"error": "邮件发送失败，请检查服务器网络"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "邮件发送失败，请检查服务器网络")
 		return
 	}
 
-	emailCodeMap[email] = VerifyCode{
-		Code:      code,
-		ExpiresAt: time.Now().Add(5 * time.Minute),
-	}
-	fmt.Println("✅ 成功向", email, "发送验证码:", code)
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "验证码发送成功，请注意查收！",
-	})
+	saveEmailCode(email, code)
+	writeJSON(w, http.StatusOK, map[string]string{"message": "验证码发送成功，请注意查收！"})
 }
 
 // ---------------------------------------------------------
 // 5. 获取帖子列表接口
 // ---------------------------------------------------------
 func handleGetPosts(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-	if r.Method == "OPTIONS" {
+	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
 
-	var posts []Post
-	db.Order("created_at desc").Find(&posts)
+	currentUser, hasLoginUser := currentUserFromRequest(r)
 
-	// 2. 循环每一条帖子，去用户表动态抓取最新的昵称和头像
+	var posts []Post
+	if err := db.Order("created_at desc").Find(&posts).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "帖子读取失败")
+		return
+	}
+
 	for i := 0; i < len(posts); i++ {
 		var user User
-		// 根据帖子记录里的唯一 username，去用户表搜寻其当下的状态
 		if err := db.Where("username = ?", posts[i].Username).First(&user).Error; err == nil {
-			// 用用户表里最新的数据，覆盖掉帖子表里的旧快照
 			posts[i].Nickname = user.Nickname
 			posts[i].Avatar = user.Avatar
 		} else {
-			// 该用户如果被销户了，帖子会显示“已注销用户”
 			posts[i].Nickname = "已注销用户"
 			posts[i].Avatar = "https://api.dicebear.com/7.x/adventurer/svg?seed=deleted"
 		}
+
+		db.Where("post_id = ?", posts[i].ID).Order("created_at asc").Find(&posts[i].Comments)
+		db.Model(&Favorite{}).Where("post_id = ?", posts[i].ID).Count(&posts[i].FavoriteCount)
+
+		if hasLoginUser {
+			var fav Favorite
+			if err := db.Where("uid = ? AND post_id = ?", currentUser.UID, posts[i].ID).First(&fav).Error; err == nil {
+				posts[i].IsFavorited = true
+			}
+		}
 	}
 
-	json.NewEncoder(w).Encode(posts)
+	writeJSON(w, http.StatusOK, posts)
 }
 
 // ---------------------------------------------------------
 // 6. 发布帖子接口
 // ---------------------------------------------------------
 func handleCreatePost(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 
-	if r.Method == "OPTIONS" {
+	user, ok := requireUser(w, r)
+	if !ok {
 		return
 	}
 
 	var req CreatePostRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error": "数据格式不对"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "数据格式不对")
 		return
 	}
 
-	if req.Content == "" {
-		http.Error(w, `{"error": "帖子内容不能为空"}`, http.StatusBadRequest)
+	content := strings.TrimSpace(req.Content)
+	if content == "" {
+		writeError(w, http.StatusBadRequest, "帖子内容不能为空")
 		return
 	}
 
 	newPost := Post{
-		Username:  req.Username,
-		Nickname:  req.Nickname, // ✨【新增这行】将昵称锁进数据库
-		Avatar:    req.Avatar,
-		Content:   req.Content,
+		Username:  user.Username,
+		Nickname:  user.Nickname,
+		Avatar:    user.Avatar,
+		Content:   content,
 		CreatedAt: time.Now(),
 	}
 
 	if result := db.Create(&newPost); result.Error != nil {
-		http.Error(w, `{"error": "发帖失败，数据库错误"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "发帖失败，数据库错误")
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "发布成功！",
-	})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "发布成功！"})
 }
 
 // ---------------------------------------------------------
 // 7. 删除帖子接口
 // ---------------------------------------------------------
 func handleDeletePost(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-	if r.Method == "OPTIONS" {
+	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
 
-	// 临时定义一个结构体来接收前端传来的数据
+	user, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+
 	var req struct {
-		PostID   uint   `json:"post_id"`
-		Username string `json:"username"`
+		PostID uint `json:"post_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error": "数据格式不对"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "数据格式不对")
 		return
 	}
 
-	// 1. 去数据库里寻找这个帖子
 	var post Post
 	if result := db.First(&post, req.PostID); result.Error != nil {
-		http.Error(w, `{"error": "找不到该帖子，可能已被删除"}`, http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "找不到该帖子，可能已被删除")
 		return
 	}
 
-	// 2. 权限核对：只有帖子的主人，或者“超级管理员”才有资格删除
-	if post.Username != req.Username && req.Username != "超级管理员" {
-		http.Error(w, `{"error": "越权操作：您只能删除自己的帖子！"}`, http.StatusForbidden)
+	if post.Username != user.Username && user.Role != 2 {
+		writeError(w, http.StatusForbidden, "越权操作：您只能删除自己的帖子")
 		return
 	}
 
-	// 3. 执行物理销毁
+	db.Where("post_id = ?", post.ID).Delete(&Comment{})
+	db.Where("post_id = ?", post.ID).Delete(&Favorite{})
 	if result := db.Delete(&post); result.Error != nil {
-		http.Error(w, `{"error": "删除失败，数据库出错"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "删除失败，数据库出错")
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "帖子已永久销毁",
-	})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "帖子已永久销毁"})
 }
 
 // ---------------------------------------------------------
 // 8. 获取所有用户列表
 // ---------------------------------------------------------
 func handleGetUsers(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-	if r.Method == "OPTIONS" {
+	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
 
-	// 安全检查：由于暂时没有做复杂的 JWT 令牌，通过 URL 参数或请求头核对身份
-	adminName := r.URL.Query().Get("admin")
-	if adminName != "超级管理员" {
-		http.Error(w, `{"error": "越权访问：你不是超级管理员！"}`, http.StatusForbidden)
+	if _, ok := requireAdmin(w, r); !ok {
 		return
 	}
 
 	var users []User
-	// 查出所有用户（GORM 自动会忽略在模型里打上 json:"-" 的密码字段）
-	db.Find(&users)
+	if err := db.Order("uid asc").Find(&users).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "用户列表读取失败")
+		return
+	}
 
-	json.NewEncoder(w).Encode(users)
+	writeJSON(w, http.StatusOK, users)
 }
 
 // ---------------------------------------------------------
 // 9. 强制注销（删除）某个用户
 // ---------------------------------------------------------
 func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 
-	if r.Method == "OPTIONS" {
+	admin, ok := requireAdmin(w, r)
+	if !ok {
 		return
 	}
 
 	var req struct {
-		AdminName string `json:"admin_name"`
-		TargetUID uint   `json:"target_uid"`
+		TargetUID uint `json:"target_uid"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error": "数据格式不对"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "数据格式不对")
 		return
 	}
 
-	// 核心校验
-	if req.AdminName != "超级管理员" {
-		http.Error(w, `{"error": "拒绝执行：只有超级管理员拥有终极裁决权！"}`, http.StatusForbidden)
+	var target User
+	if result := db.First(&target, req.TargetUID); result.Error != nil {
+		writeError(w, http.StatusNotFound, "找不到该用户")
+		return
+	}
+	if target.UID == admin.UID || target.Role == 2 {
+		writeError(w, http.StatusForbidden, "不能删除超级管理员账号")
 		return
 	}
 
-	// 执行物理删除
-	var user User
-	if result := db.Delete(&user, req.TargetUID); result.Error != nil {
-		http.Error(w, `{"error": "注销失败，数据库错误"}`, http.StatusInternalServerError)
+	db.Where("uid = ?", target.UID).Delete(&Favorite{})
+	if result := db.Delete(&target); result.Error != nil {
+		writeError(w, http.StatusInternalServerError, "注销失败，数据库错误")
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "该用户已被强制剥夺权限并注销账号",
-	})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "该用户已被强制注销"})
+}
+
+// ---------------------------------------------------------
+// 10. 发表评论接口
+// ---------------------------------------------------------
+func handleCreateComment(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	user, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		PostID  uint   `json:"post_id"`
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "数据格式不对")
+		return
+	}
+
+	content := strings.TrimSpace(req.Content)
+	if content == "" {
+		writeError(w, http.StatusBadRequest, "评论内容不能为空")
+		return
+	}
+
+	var post Post
+	if result := db.First(&post, req.PostID); result.Error != nil {
+		writeError(w, http.StatusNotFound, "找不到要评论的帖子")
+		return
+	}
+
+	comment := Comment{
+		PostID:    req.PostID,
+		Username:  user.Username,
+		Nickname:  user.Nickname,
+		Avatar:    user.Avatar,
+		Content:   content,
+		CreatedAt: time.Now(),
+	}
+
+	if err := db.Create(&comment).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "评论失败，数据库错误")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "评论成功！"})
+}
+
+// ---------------------------------------------------------
+// 11. 切换收藏状态接口 (点一下收藏，再点一下取消)
+// ---------------------------------------------------------
+func handleToggleFavorite(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	user, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		PostID uint `json:"post_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "数据格式不对")
+		return
+	}
+
+	var post Post
+	if result := db.First(&post, req.PostID); result.Error != nil {
+		writeError(w, http.StatusNotFound, "找不到该帖子")
+		return
+	}
+
+	var fav Favorite
+	result := db.Where("uid = ? AND post_id = ?", user.UID, req.PostID).First(&fav)
+
+	if result.Error == nil {
+		db.Delete(&fav)
+		writeJSON(w, http.StatusOK, map[string]interface{}{"message": "已取消收藏", "is_favorited": false})
+		return
+	}
+
+	newFav := Favorite{UID: user.UID, PostID: req.PostID}
+	if err := db.Create(&newFav).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "收藏失败，数据库错误")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"message": "收藏成功", "is_favorited": true})
+}
+
+// ---------------------------------------------------------
+// 12. 删除评论接口
+// ---------------------------------------------------------
+func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	user, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		CommentID uint `json:"comment_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "数据格式不对")
+		return
+	}
+
+	var comment Comment
+	if result := db.First(&comment, req.CommentID); result.Error != nil {
+		writeError(w, http.StatusNotFound, "找不到该评论，可能已被删除")
+		return
+	}
+
+	if comment.Username != user.Username && user.Role != 2 {
+		writeError(w, http.StatusForbidden, "越权操作：您只能删除自己的评论")
+		return
+	}
+
+	if result := db.Delete(&comment); result.Error != nil {
+		writeError(w, http.StatusInternalServerError, "删除失败，数据库出错")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "评论已删除"})
 }
