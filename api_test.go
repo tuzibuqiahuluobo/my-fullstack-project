@@ -69,7 +69,7 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 
 	req := newJSONRequest(t, http.MethodPost, "/api/login", map[string]string{
 		"username": "alice",
-		"password": "wrong123",
+		"password": "Wrong123",
 	})
 	rec := httptest.NewRecorder()
 
@@ -89,23 +89,39 @@ func TestRegisterRejectsInvalidInputLimits(t *testing.T) {
 	}{
 		{
 			name: "username too short",
-			body: map[string]string{"username": "a", "password": "secret123", "email": "short@qq.com", "code": "123456"},
+			body: map[string]string{"username": "ab", "password": "Secret123", "email": "short@qq.com", "code": "123456"},
+		},
+		{
+			name: "username does not start with letter",
+			body: map[string]string{"username": "1user", "password": "Secret123", "email": "start@qq.com", "code": "123456"},
+		},
+		{
+			name: "username contains sensitive word",
+			body: map[string]string{"username": "adminUser", "password": "Secret123", "email": "sensitive@qq.com", "code": "123456"},
 		},
 		{
 			name: "password too long",
-			body: map[string]string{"username": "valid_user", "password": "123456789012345678901234567890123", "email": "long@qq.com", "code": "123456"},
+			body: map[string]string{"username": "validuser", "password": "Aa123456789012345678901234567890123", "email": "long@qq.com", "code": "123456"},
 		},
 		{
 			name: "password missing number",
-			body: map[string]string{"username": "valid_user", "password": "password", "email": "letters@qq.com", "code": "123456"},
+			body: map[string]string{"username": "validuser", "password": "Password", "email": "letters@qq.com", "code": "123456"},
 		},
 		{
 			name: "password missing letter",
-			body: map[string]string{"username": "valid_user", "password": "12345678", "email": "digits@qq.com", "code": "123456"},
+			body: map[string]string{"username": "validuser", "password": "12345678", "email": "digits@qq.com", "code": "123456"},
+		},
+		{
+			name: "password missing uppercase",
+			body: map[string]string{"username": "validuser", "password": "secret123", "email": "upper@qq.com", "code": "123456"},
+		},
+		{
+			name: "password has unsupported special char",
+			body: map[string]string{"username": "validuser", "password": "Secret123?", "email": "special@qq.com", "code": "123456"},
 		},
 		{
 			name: "unsupported email",
-			body: map[string]string{"username": "valid_user", "password": "secret123", "email": "user@example.com", "code": "123456"},
+			body: map[string]string{"username": "validuser", "password": "Secret123", "email": "user@example.com", "code": "123456"},
 		},
 	}
 
@@ -135,6 +151,30 @@ func TestUpdateRejectsLongNickname(t *testing.T) {
 
 	req := newJSONRequest(t, http.MethodPost, "/api/update", map[string]string{
 		"nickname": "这是一个明确超过十五个字的昵称内容",
+	})
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handleUpdate(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("期望状态码 400，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUpdateRejectsSensitiveSignature(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	user := createTestUser(t, "sign_user", 0)
+	token, err := generateToken(user)
+	if err != nil {
+		t.Fatalf("生成测试 token 失败: %v", err)
+	}
+
+	signature := "这里有诈骗信息"
+	req := newJSONRequest(t, http.MethodPost, "/api/update", UpdateRequest{
+		Signature: &signature,
 	})
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
@@ -291,7 +331,7 @@ func TestResetPasswordAllowsLoginWithNewPassword(t *testing.T) {
 	req := newJSONRequest(t, http.MethodPost, "/api/reset-password", map[string]string{
 		"email":        "rainy@qq.com",
 		"code":         "654321",
-		"new_password": "newpass123",
+		"new_password": "Newpass123",
 	})
 	rec := httptest.NewRecorder()
 
@@ -303,7 +343,7 @@ func TestResetPasswordAllowsLoginWithNewPassword(t *testing.T) {
 
 	loginReq := newJSONRequest(t, http.MethodPost, "/api/login", map[string]string{
 		"username": "rainy",
-		"password": "newpass123",
+		"password": "Newpass123",
 	})
 	loginRec := httptest.NewRecorder()
 	handleLogin(loginRec, loginReq)

@@ -17,54 +17,112 @@ import (
 )
 
 const (
-	usernameMinLength = 2
-	usernameMaxLength = 20
+	usernameMinLength = 3
+	usernameMaxLength = 15
 	nicknameMaxLength = 15
 	passwordMinLength = 8
 	passwordMaxLength = 32
 	emailMaxLength    = 254
 )
 
+var sensitiveWords = []string{
+	"admin", "administrator", "root", "system", "official", "sunshine官方",
+	"管理员", "超级管理员", "官方", "客服", "站长", "版主",
+	"傻逼", "垃圾", "操", "妈的", "fuck", "shit",
+	"赌博", "博彩", "诈骗", "外挂", "代刷", "色情", "约炮", "毒品",
+}
+
+const passwordSpecialChars = "！!@#￥%*&"
+const passwordSpecialCharsText = "！@#￥%*&"
+
 func textLength(value string) int {
 	// 用 rune 统计“字数”，中文、英文和常见符号都按用户直观看到的字符数量计算。
 	return len([]rune(value))
 }
 
-func validateUsernameLength(username string) string {
+func containsSensitiveWord(value string) bool {
+	// 敏感词统一转成小写再比较，这样 Admin、ADMIN、admin 都会被识别。
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	for _, word := range sensitiveWords {
+		if strings.Contains(normalized, strings.ToLower(word)) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateNoSensitiveWord(label string, value string) string {
+	if containsSensitiveWord(value) {
+		return label + "包含不适合使用的词，请换一个更友好的内容"
+	}
+	return ""
+}
+
+func validateUsername(username string) string {
 	length := textLength(username)
 	if length < usernameMinLength || length > usernameMaxLength {
 		return fmt.Sprintf("账号长度需要在 %d-%d 个字之间", usernameMinLength, usernameMaxLength)
 	}
-	return ""
-}
-
-func validateNicknameLength(nickname string) string {
-	if textLength(nickname) > nicknameMaxLength {
-		return fmt.Sprintf("昵称最多 %d 个字", nicknameMaxLength)
+	firstChar := []rune(username)[0]
+	if !unicode.IsLetter(firstChar) || firstChar > unicode.MaxASCII {
+		return "账号必须以英文字母开头"
+	}
+	if message := validateNoSensitiveWord("账号", username); message != "" {
+		return message
 	}
 	return ""
 }
 
-func validatePasswordLength(password string) string {
+func validateNickname(nickname string) string {
+	if textLength(nickname) > nicknameMaxLength {
+		return fmt.Sprintf("昵称最多 %d 个字", nicknameMaxLength)
+	}
+	if message := validateNoSensitiveWord("昵称", nickname); message != "" {
+		return message
+	}
+	return ""
+}
+
+func validateSignature(signature string) string {
+	if textLength(signature) > 50 {
+		return "个性签名最多 50 个字"
+	}
+	if message := validateNoSensitiveWord("个性签名", signature); message != "" {
+		return message
+	}
+	return ""
+}
+
+func validatePassword(password string) string {
 	length := textLength(password)
 	if length < passwordMinLength || length > passwordMaxLength {
 		return fmt.Sprintf("密码长度需要在 %d-%d 个字之间", passwordMinLength, passwordMaxLength)
 	}
-	hasLetter := false
+	hasUpper := false
+	hasLower := false
 	hasDigit := false
 	for _, char := range password {
 		if unicode.IsSpace(char) {
 			return "密码不能包含空格或换行"
 		}
-		if unicode.IsLetter(char) {
-			hasLetter = true
+		if unicode.IsUpper(char) {
+			hasUpper = true
+			continue
+		}
+		if unicode.IsLower(char) {
+			hasLower = true
+			continue
 		}
 		if unicode.IsDigit(char) {
 			hasDigit = true
+			continue
+		}
+		if !strings.ContainsRune(passwordSpecialChars, char) {
+			return "密码特殊字符只能使用 " + passwordSpecialCharsText
 		}
 	}
-	if !hasLetter || !hasDigit {
-		return "密码需要同时包含字母和数字"
+	if !hasUpper || !hasLower || !hasDigit {
+		return "密码需要同时包含大写字母、小写字母和数字"
 	}
 	return ""
 }
@@ -226,11 +284,11 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "用户名、密码、邮箱和验证码都不能为空")
 		return
 	}
-	if message := validateUsernameLength(req.Username); message != "" {
+	if message := validateUsername(req.Username); message != "" {
 		writeError(w, http.StatusBadRequest, message)
 		return
 	}
-	if message := validatePasswordLength(req.Password); message != "" {
+	if message := validatePassword(req.Password); message != "" {
 		writeError(w, http.StatusBadRequest, message)
 		return
 	}
@@ -303,11 +361,11 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "用户名和密码不能为空")
 		return
 	}
-	if message := validateUsernameLength(req.Username); message != "" {
+	if message := validateUsername(req.Username); message != "" {
 		writeError(w, http.StatusBadRequest, message)
 		return
 	}
-	if message := validatePasswordLength(req.Password); message != "" {
+	if message := validatePassword(req.Password); message != "" {
 		writeError(w, http.StatusBadRequest, message)
 		return
 	}
@@ -386,7 +444,7 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	usernameChanged := false
 
 	if newNickname != "" {
-		if message := validateNicknameLength(newNickname); message != "" {
+		if message := validateNickname(newNickname); message != "" {
 			writeError(w, http.StatusBadRequest, message)
 			return
 		}
@@ -397,8 +455,8 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Signature != nil {
 		newSignature := strings.TrimSpace(*req.Signature)
-		if len([]rune(newSignature)) > 50 {
-			writeError(w, http.StatusBadRequest, "个性签名最多 50 个字")
+		if message := validateSignature(newSignature); message != "" {
+			writeError(w, http.StatusBadRequest, message)
 			return
 		}
 		// 个性签名允许清空，所以用指针判断前端是否真的提交了这个字段。
@@ -406,7 +464,7 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if newUsername != "" && newUsername != user.Username {
-		if message := validateUsernameLength(newUsername); message != "" {
+		if message := validateUsername(newUsername); message != "" {
 			writeError(w, http.StatusBadRequest, message)
 			return
 		}
@@ -443,7 +501,7 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if newPassword != "" {
-		if message := validatePasswordLength(newPassword); message != "" {
+		if message := validatePassword(newPassword); message != "" {
 			writeError(w, http.StatusBadRequest, message)
 			return
 		}
@@ -954,7 +1012,7 @@ func handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, message)
 		return
 	}
-	if message := validatePasswordLength(newPassword); message != "" {
+	if message := validatePassword(newPassword); message != "" {
 		writeError(w, http.StatusBadRequest, message)
 		return
 	}
@@ -1028,7 +1086,7 @@ func handleUpdateAdminProfile(w http.ResponseWriter, r *http.Request) {
 	oldUsername := admin.Username
 	usernameChanged := false
 	if newUsername != "" && newUsername != admin.Username {
-		if message := validateUsernameLength(newUsername); message != "" {
+		if message := validateUsername(newUsername); message != "" {
 			writeError(w, http.StatusBadRequest, message)
 			return
 		}
@@ -1060,7 +1118,7 @@ func handleUpdateAdminProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if newPassword != "" {
-		if message := validatePasswordLength(newPassword); message != "" {
+		if message := validatePassword(newPassword); message != "" {
 			writeError(w, http.StatusBadRequest, message)
 			return
 		}
