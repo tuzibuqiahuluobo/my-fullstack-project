@@ -248,6 +248,70 @@ func TestCreatePostAllowsImageOnly(t *testing.T) {
 	}
 }
 
+func TestCreatePostAllowsMultipleImages(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	user := createTestUser(t, "multi_image_user", 0)
+	token, err := generateToken(user)
+	if err != nil {
+		t.Fatalf("生成测试 token 失败: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodPost, "/api/create-post", map[string]interface{}{
+		"title":   "旅行记录",
+		"content": "今天看到了很好看的天空",
+		"images": []string{
+			"data:image/png;base64,aGVsbG8=",
+			"data:image/webp;base64,d29ybGQ=",
+		},
+	})
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handleCreatePost(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望状态码 200，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+	var post Post
+	if err := db.First(&post).Error; err != nil {
+		t.Fatalf("期望多图帖子被保存，实际查询失败: %v", err)
+	}
+	enrichPostForResponse(&post, user, true)
+	if post.Title != "旅行记录" || len(post.Images) != 2 {
+		t.Fatalf("期望保存标题和 2 张图片，实际标题=%q 图片数=%d", post.Title, len(post.Images))
+	}
+}
+
+func TestCreatePostRejectsTooManyImages(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	user := createTestUser(t, "too_many_image_user", 0)
+	token, err := generateToken(user)
+	if err != nil {
+		t.Fatalf("生成测试 token 失败: %v", err)
+	}
+
+	images := make([]string, 10)
+	for i := range images {
+		images[i] = "data:image/png;base64,aGVsbG8="
+	}
+	req := newJSONRequest(t, http.MethodPost, "/api/create-post", map[string]interface{}{
+		"content": "hello",
+		"images":  images,
+	})
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handleCreatePost(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("期望状态码 400，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCreatePostRejectsEmptyContentAndImage(t *testing.T) {
 	setupTestDB(t)
 	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
@@ -292,6 +356,48 @@ func TestCreatePostRejectsInvalidImageData(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("期望状态码 400，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUpdatePostAllowsAuthorToEditTitleContentAndImages(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	user := createTestUser(t, "edit_post_user", 0)
+	token, err := generateToken(user)
+	if err != nil {
+		t.Fatalf("生成测试 token 失败: %v", err)
+	}
+	post := Post{
+		Username:  user.Username,
+		Content:   "old content",
+		CreatedAt: user.UsernameUpdatedAt,
+	}
+	if err := db.Create(&post).Error; err != nil {
+		t.Fatalf("创建测试帖子失败: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodPost, "/api/update-post", map[string]interface{}{
+		"post_id": post.ID,
+		"title":   "新标题",
+		"content": "new content",
+		"images":  []string{"data:image/png;base64,aGVsbG8="},
+	})
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handleUpdatePost(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望状态码 200，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+	var updated Post
+	if err := db.First(&updated, post.ID).Error; err != nil {
+		t.Fatalf("读取编辑后的帖子失败: %v", err)
+	}
+	enrichPostForResponse(&updated, user, true)
+	if updated.Title != "新标题" || updated.Content != "new content" || len(updated.Images) != 1 {
+		t.Fatalf("期望帖子内容被更新，实际: 标题=%q 正文=%q 图片数=%d", updated.Title, updated.Content, len(updated.Images))
 	}
 }
 

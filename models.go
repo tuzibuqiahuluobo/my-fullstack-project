@@ -37,8 +37,10 @@ type Post struct {
 	Username  string    `json:"username"`
 	Nickname  string    `json:"nickname"` // ✨【新增】用于前端展示的昵称
 	Avatar    string    `json:"avatar"`
+	Title     string    `json:"title"` // 新增：帖子标题可以为空，前端会在为空时显示正文摘要。
 	Content   string    `json:"content"`
-	Image     string    `json:"image"` // 新增：保存帖子图片的 dataURL，方便前端列表和详情页直接展示。
+	Image     string    `json:"image"`                  // 兼容旧数据：旧版本只保存单张图片，新版本会继续返回第一张图。
+	ImagesRaw string    `json:"-" gorm:"column:images"` // 新增：多图用 JSON 字符串存入 SQLite，避免额外建表增加初学理解成本。
 	CreatedAt time.Time `json:"created_at"`
 
 	// 【虚拟字段】打上 gorm:"-" 标签，代表不存入帖子表，仅用于动态计算并传给前端
@@ -46,6 +48,7 @@ type Post struct {
 	FavoriteCount int64     `json:"favorite_count" gorm:"-"`
 	IsFavorited   bool      `json:"is_favorited" gorm:"-"`
 	Signature     string    `json:"signature" gorm:"-"` // 【新增】帖子表里不单独存签名，返回时读取作者当前签名
+	Images        []string  `json:"images" gorm:"-"`    // 新增：返回给前端的多图数组，不直接作为数据库字段。
 }
 
 type VerifyCode struct {
@@ -75,11 +78,21 @@ type UpdateRequest struct {
 }
 
 type CreatePostRequest struct {
-	Username string `json:"username"`
-	Nickname string `json:"nickname"` // 接收前端传来的昵称
-	Avatar   string `json:"avatar"`
-	Content  string `json:"content"`
-	Image    string `json:"image"` // 新增：发帖时可选的图片，后端会校验格式和大小。
+	Username string   `json:"username"`
+	Nickname string   `json:"nickname"` // 接收前端传来的昵称
+	Avatar   string   `json:"avatar"`
+	Title    string   `json:"title"`
+	Content  string   `json:"content"`
+	Image    string   `json:"image"`  // 兼容旧前端单图字段
+	Images   []string `json:"images"` // 新增：发帖时可选的多图数组，最多 9 张。
+}
+
+type UpdatePostRequest struct {
+	PostID  uint     `json:"post_id"`
+	Title   string   `json:"title"`
+	Content string   `json:"content"`
+	Image   string   `json:"image"`  // 兼容旧前端单图字段
+	Images  []string `json:"images"` // 新增：编辑帖子时提交完整图片列表。
 }
 
 // 评论表

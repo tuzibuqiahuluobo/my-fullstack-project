@@ -26,6 +26,7 @@ func main() {
 	mux.HandleFunc("/api/posts", handleGetPosts)
 	mux.HandleFunc("/api/post-detail", handleGetPostDetail)
 	mux.HandleFunc("/api/create-post", handleCreatePost)
+	mux.HandleFunc("/api/update-post", handleUpdatePost)
 	mux.HandleFunc("/api/delete-post", handleDeletePost)
 	mux.HandleFunc("/api/users", handleGetUsers)
 	mux.HandleFunc("/api/delete-user", handleDeleteUser)

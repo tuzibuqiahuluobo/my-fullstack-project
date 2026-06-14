@@ -18,12 +18,15 @@ import (
 )
 
 const (
-	usernameMinLength = 3
-	usernameMaxLength = 15
-	nicknameMaxLength = 15
-	passwordMinLength = 8
-	passwordMaxLength = 32
-	emailMaxLength    = 254
+	usernameMinLength    = 3
+	usernameMaxLength    = 15
+	nicknameMaxLength    = 15
+	passwordMinLength    = 8
+	passwordMaxLength    = 32
+	emailMaxLength       = 254
+	postTitleMaxLength   = 60
+	postContentMaxLength = 20000
+	postMaxImageCount    = 9
 	// 图片转成 base64 后会比原文件大约多三分之一，所以后端按 dataURL 长度给 3MB 余量。
 	postImageMaxLength = 3 * 1024 * 1024
 )
@@ -269,6 +272,65 @@ func validatePostImage(image string) string {
 	return "图片格式只支持 JPG、PNG、WEBP 或 GIF"
 }
 
+func normalizePostImages(images []string, legacyImage string) []string {
+	// 旧版本前端只传 image；新版本传 images。这里统一整理成数组，方便后面共用校验和保存逻辑。
+	normalized := make([]string, 0, postMaxImageCount)
+	for _, image := range images {
+		image = strings.TrimSpace(image)
+		if image != "" {
+			normalized = append(normalized, image)
+		}
+	}
+	if len(normalized) == 0 {
+		legacyImage = strings.TrimSpace(legacyImage)
+		if legacyImage != "" {
+			normalized = append(normalized, legacyImage)
+		}
+	}
+	return normalized
+}
+
+func validatePostImages(images []string) string {
+	if len(images) > postMaxImageCount {
+		return fmt.Sprintf("帖子图片最多上传 %d 张", postMaxImageCount)
+	}
+	for _, image := range images {
+		if message := validatePostImage(image); message != "" {
+			return message
+		}
+	}
+	return ""
+}
+
+func encodePostImages(images []string) (string, error) {
+	if len(images) == 0 {
+		return "", nil
+	}
+	// SQLite 没有专门的数组字段，这里把图片数组编码成 JSON 字符串保存，读取时再还原成数组。
+	data, err := json.Marshal(images)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func fillPostImagesForResponse(post *Post) {
+	images := make([]string, 0, postMaxImageCount)
+	if strings.TrimSpace(post.ImagesRaw) != "" {
+		if err := json.Unmarshal([]byte(post.ImagesRaw), &images); err != nil {
+			images = []string{}
+		}
+	}
+	if len(images) == 0 && strings.TrimSpace(post.Image) != "" {
+		// 老帖子只有 image 字段，也补进 images 数组，前端九宫格组件就能统一渲染。
+		images = append(images, post.Image)
+	}
+	post.Images = images
+	if len(images) > 0 {
+		post.Image = images[0]
+	}
+}
+
 func enrichPostForResponse(post *Post, currentUser User, hasLoginUser bool) {
 	var author User
 	if err := db.Where("username = ?", post.Username).First(&author).Error; err == nil {
@@ -291,6 +353,7 @@ func enrichPostForResponse(post *Post, currentUser User, hasLoginUser bool) {
 			post.IsFavorited = true
 		}
 	}
+	fillPostImagesForResponse(post)
 }
 
 // ---------------------------------------------------------
@@ -667,14 +730,28 @@ func handleCreatePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	title := strings.TrimSpace(req.Title)
 	content := strings.TrimSpace(req.Content)
-	image := strings.TrimSpace(req.Image)
-	if content == "" && image == "" {
+	images := normalizePostImages(req.Images, req.Image)
+	if title != "" && textLength(title) > postTitleMaxLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("帖子标题最多 %d 个字", postTitleMaxLength))
+		return
+	}
+	if textLength(content) > postContentMaxLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("帖子正文最多 %d 个字", postContentMaxLength))
+		return
+	}
+	if content == "" && len(images) == 0 {
 		writeError(w, http.StatusBadRequest, "帖子内容或图片至少要有一个")
 		return
 	}
-	if message := validatePostImage(image); message != "" {
+	if message := validatePostImages(images); message != "" {
 		writeError(w, http.StatusBadRequest, message)
+		return
+	}
+	imagesRaw, err := encodePostImages(images)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "图片数据保存格式不正确")
 		return
 	}
 
@@ -682,9 +759,14 @@ func handleCreatePost(w http.ResponseWriter, r *http.Request) {
 		Username:  user.Username,
 		Nickname:  user.Nickname,
 		Avatar:    user.Avatar,
+		Title:     title,
 		Content:   content,
-		Image:     image,
+		Image:     "",
+		ImagesRaw: imagesRaw,
 		CreatedAt: time.Now(),
+	}
+	if len(images) > 0 {
+		newPost.Image = images[0]
 	}
 
 	if result := db.Create(&newPost); result.Error != nil {
@@ -693,6 +775,80 @@ func handleCreatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "发布成功！"})
+}
+
+// ---------------------------------------------------------
+// 7.1 编辑帖子接口
+// ---------------------------------------------------------
+func handleUpdatePost(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
+	user, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+
+	var req UpdatePostRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "数据格式不对")
+		return
+	}
+	if req.PostID == 0 {
+		writeError(w, http.StatusBadRequest, "帖子 ID 不正确")
+		return
+	}
+
+	var post Post
+	if result := db.First(&post, req.PostID); result.Error != nil {
+		writeError(w, http.StatusNotFound, "找不到该帖子，可能已被删除")
+		return
+	}
+	if post.Username != user.Username && user.Role != 2 {
+		writeError(w, http.StatusForbidden, "越权操作：您只能编辑自己的帖子")
+		return
+	}
+
+	title := strings.TrimSpace(req.Title)
+	content := strings.TrimSpace(req.Content)
+	images := normalizePostImages(req.Images, req.Image)
+	if title != "" && textLength(title) > postTitleMaxLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("帖子标题最多 %d 个字", postTitleMaxLength))
+		return
+	}
+	if textLength(content) > postContentMaxLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("帖子正文最多 %d 个字", postContentMaxLength))
+		return
+	}
+	if content == "" && len(images) == 0 {
+		writeError(w, http.StatusBadRequest, "帖子内容或图片至少要有一个")
+		return
+	}
+	if message := validatePostImages(images); message != "" {
+		writeError(w, http.StatusBadRequest, message)
+		return
+	}
+	imagesRaw, err := encodePostImages(images)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "图片数据保存格式不正确")
+		return
+	}
+
+	post.Title = title
+	post.Content = content
+	post.ImagesRaw = imagesRaw
+	post.Image = ""
+	if len(images) > 0 {
+		post.Image = images[0]
+	}
+
+	if result := db.Save(&post); result.Error != nil {
+		writeError(w, http.StatusInternalServerError, "编辑失败，数据库错误")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "帖子已保存"})
 }
 
 // ---------------------------------------------------------
