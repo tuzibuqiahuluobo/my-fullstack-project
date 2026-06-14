@@ -1,0 +1,5 @@
+# 部署脚本会在 Linux 服务器执行，必须保持 LF 换行，避免 bash 读取到多余的 \r。
+deploy/*.sh text eol=lf
+deploy/*.service text eol=lf
+deploy/*.timer text eol=lf
+deploy/*.conf text eol=lf

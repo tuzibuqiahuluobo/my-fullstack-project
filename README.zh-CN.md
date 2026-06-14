@@ -191,3 +191,13 @@ go run .
 ## AI 撰写声明
 
 本项目约有 70% 的代码由 AI 协助撰写。
+
+## 阿里云轻量服务器部署
+
+如果要部署到 Ubuntu 22.04/24.04 的阿里云轻量应用服务器，请查看：
+
+```text
+deploy/README.zh-CN.md
+```
+
+该目录包含 Nginx 配置、systemd 服务、SQLite 每日备份和 Ubuntu 部署脚本模板。上线时不要提交真实 `.env`、邮箱授权码或服务器生成的 `data.db`。

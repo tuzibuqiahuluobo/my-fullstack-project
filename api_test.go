@@ -127,6 +127,71 @@ func TestAdminEndpointRejectsNormalUser(t *testing.T) {
 	}
 }
 
+func TestGetCurrentUserReturnsSignature(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	user := createTestUser(t, "sign_user", 0)
+	user.Signature = "今天也要闪闪发光"
+	if err := db.Save(&user).Error; err != nil {
+		t.Fatalf("保存测试个性签名失败: %v", err)
+	}
+	token, err := generateToken(user)
+	if err != nil {
+		t.Fatalf("生成测试 token 失败: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodGet, "/api/me", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handleGetCurrentUser(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望状态码 200，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if body["signature"] != "今天也要闪闪发光" {
+		t.Fatalf("期望返回最新个性签名，实际得到 %v", body["signature"])
+	}
+}
+
+func TestGetPostsIncludesAuthorSignature(t *testing.T) {
+	setupTestDB(t)
+
+	user := createTestUser(t, "post_author", 0)
+	user.Signature = "在社区留下小小脚印"
+	if err := db.Save(&user).Error; err != nil {
+		t.Fatalf("保存测试个性签名失败: %v", err)
+	}
+	if err := db.Create(&Post{
+		Username:  user.Username,
+		Content:   "hello sunshine",
+		CreatedAt: user.UsernameUpdatedAt,
+	}).Error; err != nil {
+		t.Fatalf("创建测试帖子失败: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodGet, "/api/posts", nil)
+	rec := httptest.NewRecorder()
+
+	handleGetPosts(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望状态码 200，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+	var posts []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &posts); err != nil {
+		t.Fatalf("解析帖子响应失败: %v", err)
+	}
+	if len(posts) != 1 || posts[0]["signature"] != "在社区留下小小脚印" {
+		t.Fatalf("期望帖子带出作者个性签名，实际响应: %v", posts)
+	}
+}
+
 func TestRecoverAccountReturnsUsernameWithValidCode(t *testing.T) {
 	setupTestDB(t)
 	createTestUser(t, "sunny", 0)

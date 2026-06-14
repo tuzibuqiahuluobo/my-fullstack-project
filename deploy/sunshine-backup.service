@@ -1,0 +1,7 @@
+[Unit]
+Description=Backup SunShine SQLite database
+
+[Service]
+Type=oneshot
+ExecStart=/opt/sunshine/my-backend/deploy/backup-sqlite.sh
+

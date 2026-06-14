@@ -159,3 +159,13 @@ This is a learning project. No license file has been added yet.
 ## AI Attribution
 
 Approximately 70% of this project was written with AI assistance.
+
+## Alibaba Cloud Deployment
+
+For Ubuntu 22.04/24.04 deployment on Alibaba Cloud Simple Application Server, see:
+
+```text
+deploy/README.zh-CN.md
+```
+
+The deploy folder includes Nginx, systemd, SQLite backup, and Ubuntu deployment templates. Do not commit real `.env` secrets or the production `data.db`.

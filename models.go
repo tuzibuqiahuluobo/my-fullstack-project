@@ -29,6 +29,7 @@ type User struct {
 	Role              int       `json:"role"`
 	UsernameUpdatedAt time.Time `json:"username_updated_at"` // 【新增】记录上次修改用户名的时间
 	Nickname          string    `json:"nickname"`            // 【新增】用户昵称
+	Signature         string    `json:"signature"`           // 【新增】个性签名，最多 50 个字
 }
 
 type Post struct {
@@ -43,6 +44,7 @@ type Post struct {
 	Comments      []Comment `json:"comments" gorm:"-"`
 	FavoriteCount int64     `json:"favorite_count" gorm:"-"`
 	IsFavorited   bool      `json:"is_favorited" gorm:"-"`
+	Signature     string    `json:"signature" gorm:"-"` // 【新增】帖子表里不单独存签名，返回时读取作者当前签名
 }
 
 type VerifyCode struct {
@@ -61,13 +63,14 @@ type RegisterRequest struct {
 }
 
 type UpdateRequest struct {
-	UID             uint   `json:"uid"`
-	Username        string `json:"username"`
-	Avatar          string `json:"avatar"`
-	Password        string `json:"password"`
-	Nickname        string `json:"nickname"`         // 【新增】前端传来的新昵称
-	NewUsername     string `json:"new_username"`     // 【新增】想要修改的新用户名
-	CurrentPassword string `json:"current_password"` // 【新增】修改用户名时必须提供的当前密码验证
+	UID             uint    `json:"uid"`
+	Username        string  `json:"username"`
+	Avatar          string  `json:"avatar"`
+	Password        string  `json:"password"`
+	Nickname        string  `json:"nickname"`         // 【新增】前端传来的新昵称
+	Signature       *string `json:"signature"`        // 【新增】指针可以区分“没传”和“传了空字符串清空签名”
+	NewUsername     string  `json:"new_username"`     // 【新增】想要修改的新用户名
+	CurrentPassword string  `json:"current_password"` // 【新增】修改用户名时必须提供的当前密码验证
 }
 
 type CreatePostRequest struct {

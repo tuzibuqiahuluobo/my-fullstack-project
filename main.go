@@ -17,6 +17,7 @@ func main() {
 	// 使用独立 mux 是为了把所有接口统一包进 CORS 中间件，前端跨端口访问时不会漏响应头。
 	mux.HandleFunc("/api/register", handleRegister)
 	mux.HandleFunc("/api/login", handleLogin)
+	mux.HandleFunc("/api/me", handleGetCurrentUser)
 	mux.HandleFunc("/api/update", handleUpdate)
 	mux.HandleFunc("/api/send-code", handleSendCode)
 	mux.HandleFunc("/api/recover-account", handleRecoverAccount)

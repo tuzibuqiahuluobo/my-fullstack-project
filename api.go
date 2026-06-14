@@ -16,11 +16,12 @@ import (
 
 func publicUserPayload(user User) map[string]interface{} {
 	return map[string]interface{}{
-		"uid":      user.UID,
-		"username": user.Username,
-		"nickname": user.Nickname,
-		"avatar":   user.Avatar,
-		"role":     user.Role,
+		"uid":       user.UID,
+		"username":  user.Username,
+		"nickname":  user.Nickname,
+		"signature": user.Signature,
+		"avatar":    user.Avatar,
+		"role":      user.Role,
 	}
 }
 
@@ -114,9 +115,11 @@ func enrichPostForResponse(post *Post, currentUser User, hasLoginUser bool) {
 	if err := db.Where("username = ?", post.Username).First(&author).Error; err == nil {
 		post.Nickname = author.Nickname
 		post.Avatar = author.Avatar
+		post.Signature = author.Signature
 	} else {
 		post.Nickname = "已注销用户"
 		post.Avatar = "https://api.dicebear.com/7.x/adventurer/svg?seed=deleted"
+		post.Signature = ""
 	}
 
 	// 帖子详情、社区列表、我的收藏都需要这些展示数据，集中到这里避免三处写重复逻辑。
@@ -248,6 +251,23 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------
+// 2.1 获取当前登录用户资料接口
+// ---------------------------------------------------------
+func handleGetCurrentUser(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
+	user, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+
+	// Dashboard 不能只依赖 localStorage 里的旧资料，所以提供一个接口读取数据库里的最新昵称、头像和个性签名。
+	writeJSON(w, http.StatusOK, publicUserPayload(user))
+}
+
+// ---------------------------------------------------------
 // 3. 修改资料接口
 // ---------------------------------------------------------
 func handleUpdate(w http.ResponseWriter, r *http.Request) {
@@ -285,6 +305,15 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if newAvatar != "" {
 		user.Avatar = newAvatar
+	}
+	if req.Signature != nil {
+		newSignature := strings.TrimSpace(*req.Signature)
+		if len([]rune(newSignature)) > 50 {
+			writeError(w, http.StatusBadRequest, "个性签名最多 50 个字")
+			return
+		}
+		// 个性签名允许清空，所以用指针判断前端是否真的提交了这个字段。
+		user.Signature = newSignature
 	}
 
 	if newUsername != "" && newUsername != user.Username {
