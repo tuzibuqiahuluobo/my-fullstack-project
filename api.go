@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -19,7 +20,7 @@ const (
 	usernameMinLength = 2
 	usernameMaxLength = 20
 	nicknameMaxLength = 15
-	passwordMinLength = 6
+	passwordMinLength = 8
 	passwordMaxLength = 32
 	emailMaxLength    = 254
 )
@@ -48,6 +49,22 @@ func validatePasswordLength(password string) string {
 	length := textLength(password)
 	if length < passwordMinLength || length > passwordMaxLength {
 		return fmt.Sprintf("密码长度需要在 %d-%d 个字之间", passwordMinLength, passwordMaxLength)
+	}
+	hasLetter := false
+	hasDigit := false
+	for _, char := range password {
+		if unicode.IsSpace(char) {
+			return "密码不能包含空格或换行"
+		}
+		if unicode.IsLetter(char) {
+			hasLetter = true
+		}
+		if unicode.IsDigit(char) {
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
+		return "密码需要同时包含字母和数字"
 	}
 	return ""
 }

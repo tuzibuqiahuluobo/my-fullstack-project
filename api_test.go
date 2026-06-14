@@ -69,7 +69,7 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 
 	req := newJSONRequest(t, http.MethodPost, "/api/login", map[string]string{
 		"username": "alice",
-		"password": "wrong-password",
+		"password": "wrong123",
 	})
 	rec := httptest.NewRecorder()
 
@@ -94,6 +94,14 @@ func TestRegisterRejectsInvalidInputLimits(t *testing.T) {
 		{
 			name: "password too long",
 			body: map[string]string{"username": "valid_user", "password": "123456789012345678901234567890123", "email": "long@qq.com", "code": "123456"},
+		},
+		{
+			name: "password missing number",
+			body: map[string]string{"username": "valid_user", "password": "password", "email": "letters@qq.com", "code": "123456"},
+		},
+		{
+			name: "password missing letter",
+			body: map[string]string{"username": "valid_user", "password": "12345678", "email": "digits@qq.com", "code": "123456"},
 		},
 		{
 			name: "unsupported email",
