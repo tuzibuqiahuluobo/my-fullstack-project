@@ -37,7 +37,7 @@ type Post struct {
 	Username  string    `json:"username"`
 	Nickname  string    `json:"nickname"` // ✨【新增】用于前端展示的昵称
 	Avatar    string    `json:"avatar"`
-	Title     string    `json:"title"` // 新增：帖子标题可以为空，前端会在为空时显示正文摘要。
+	Title     string    `json:"title"` // 新增：帖子标题可以为空；为空时前端直接隐藏标题行。
 	Content   string    `json:"content"`
 	Image     string    `json:"image"`                  // 兼容旧数据：旧版本只保存单张图片，新版本会继续返回第一张图。
 	ImagesRaw string    `json:"-" gorm:"column:images"` // 新增：多图用 JSON 字符串存入 SQLite，避免额外建表增加初学理解成本。

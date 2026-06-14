@@ -24,7 +24,7 @@ const (
 	passwordMinLength    = 8
 	passwordMaxLength    = 32
 	emailMaxLength       = 254
-	postTitleMaxLength   = 60
+	postTitleMaxLength   = 15
 	postContentMaxLength = 20000
 	postMaxImageCount    = 9
 	// 图片转成 base64 后会比原文件大约多三分之一，所以后端按 dataURL 长度给 3MB 余量。
