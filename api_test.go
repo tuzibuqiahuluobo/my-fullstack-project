@@ -37,7 +37,7 @@ func createTestUser(t *testing.T, username string, role int) User {
 	user := User{
 		Username:     username,
 		Nickname:     username,
-		Email:        username + "@example.com",
+		Email:        username + "@qq.com",
 		PasswordHash: string(passwordHash),
 		Role:         role,
 		Avatar:       "https://example.com/avatar.png",
@@ -77,6 +77,64 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("期望状态码 401，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRegisterRejectsInvalidInputLimits(t *testing.T) {
+	setupTestDB(t)
+
+	tests := []struct {
+		name string
+		body map[string]string
+	}{
+		{
+			name: "username too short",
+			body: map[string]string{"username": "a", "password": "secret123", "email": "short@qq.com", "code": "123456"},
+		},
+		{
+			name: "password too long",
+			body: map[string]string{"username": "valid_user", "password": "123456789012345678901234567890123", "email": "long@qq.com", "code": "123456"},
+		},
+		{
+			name: "unsupported email",
+			body: map[string]string{"username": "valid_user", "password": "secret123", "email": "user@example.com", "code": "123456"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := newJSONRequest(t, http.MethodPost, "/api/register", tt.body)
+			rec := httptest.NewRecorder()
+
+			handleRegister(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("期望状态码 400，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestUpdateRejectsLongNickname(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	user := createTestUser(t, "nick_user", 0)
+	token, err := generateToken(user)
+	if err != nil {
+		t.Fatalf("生成测试 token 失败: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodPost, "/api/update", map[string]string{
+		"nickname": "这是一个明确超过十五个字的昵称内容",
+	})
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handleUpdate(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("期望状态码 400，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -195,10 +253,10 @@ func TestGetPostsIncludesAuthorSignature(t *testing.T) {
 func TestRecoverAccountReturnsUsernameWithValidCode(t *testing.T) {
 	setupTestDB(t)
 	createTestUser(t, "sunny", 0)
-	saveEmailCode("sunny@example.com", "123456")
+	saveEmailCode("sunny@qq.com", "123456")
 
 	req := newJSONRequest(t, http.MethodPost, "/api/recover-account", map[string]string{
-		"email": "sunny@example.com",
+		"email": "sunny@qq.com",
 		"code":  "123456",
 	})
 	rec := httptest.NewRecorder()
@@ -220,10 +278,10 @@ func TestRecoverAccountReturnsUsernameWithValidCode(t *testing.T) {
 func TestResetPasswordAllowsLoginWithNewPassword(t *testing.T) {
 	setupTestDB(t)
 	createTestUser(t, "rainy", 0)
-	saveEmailCode("rainy@example.com", "654321")
+	saveEmailCode("rainy@qq.com", "654321")
 
 	req := newJSONRequest(t, http.MethodPost, "/api/reset-password", map[string]string{
-		"email":        "rainy@example.com",
+		"email":        "rainy@qq.com",
 		"code":         "654321",
 		"new_password": "newpass123",
 	})

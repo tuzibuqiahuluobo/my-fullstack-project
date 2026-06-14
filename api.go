@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/mail"
 	"net/smtp"
 	"strconv"
 	"strings"
@@ -13,6 +14,57 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 )
+
+const (
+	usernameMinLength = 2
+	usernameMaxLength = 20
+	nicknameMaxLength = 15
+	passwordMinLength = 6
+	passwordMaxLength = 32
+	emailMaxLength    = 254
+)
+
+func textLength(value string) int {
+	// 用 rune 统计“字数”，中文、英文和常见符号都按用户直观看到的字符数量计算。
+	return len([]rune(value))
+}
+
+func validateUsernameLength(username string) string {
+	length := textLength(username)
+	if length < usernameMinLength || length > usernameMaxLength {
+		return fmt.Sprintf("账号长度需要在 %d-%d 个字之间", usernameMinLength, usernameMaxLength)
+	}
+	return ""
+}
+
+func validateNicknameLength(nickname string) string {
+	if textLength(nickname) > nicknameMaxLength {
+		return fmt.Sprintf("昵称最多 %d 个字", nicknameMaxLength)
+	}
+	return ""
+}
+
+func validatePasswordLength(password string) string {
+	length := textLength(password)
+	if length < passwordMinLength || length > passwordMaxLength {
+		return fmt.Sprintf("密码长度需要在 %d-%d 个字之间", passwordMinLength, passwordMaxLength)
+	}
+	return ""
+}
+
+func validateEmailAddress(email string) string {
+	if textLength(email) > emailMaxLength {
+		return "邮箱长度不能超过 254 个字符"
+	}
+	parsed, err := mail.ParseAddress(email)
+	if err != nil || parsed.Address != email {
+		return "邮箱格式不正确"
+	}
+	if !validateSupportedEmail(email) {
+		return "目前仅支持 QQ 或 Gmail 邮箱"
+	}
+	return ""
+}
 
 func publicUserPayload(user User) map[string]interface{} {
 	return map[string]interface{}{
@@ -157,8 +209,16 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "用户名、密码、邮箱和验证码都不能为空")
 		return
 	}
-	if len(req.Password) < 6 {
-		writeError(w, http.StatusBadRequest, "密码至少需要 6 位")
+	if message := validateUsernameLength(req.Username); message != "" {
+		writeError(w, http.StatusBadRequest, message)
+		return
+	}
+	if message := validatePasswordLength(req.Password); message != "" {
+		writeError(w, http.StatusBadRequest, message)
+		return
+	}
+	if message := validateEmailAddress(req.Email); message != "" {
+		writeError(w, http.StatusBadRequest, message)
 		return
 	}
 
@@ -224,6 +284,14 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	req.Password = strings.TrimSpace(req.Password)
 	if req.Username == "" || req.Password == "" {
 		writeError(w, http.StatusBadRequest, "用户名和密码不能为空")
+		return
+	}
+	if message := validateUsernameLength(req.Username); message != "" {
+		writeError(w, http.StatusBadRequest, message)
+		return
+	}
+	if message := validatePasswordLength(req.Password); message != "" {
+		writeError(w, http.StatusBadRequest, message)
 		return
 	}
 
@@ -301,6 +369,10 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	usernameChanged := false
 
 	if newNickname != "" {
+		if message := validateNicknameLength(newNickname); message != "" {
+			writeError(w, http.StatusBadRequest, message)
+			return
+		}
 		user.Nickname = newNickname
 	}
 	if newAvatar != "" {
@@ -317,6 +389,10 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if newUsername != "" && newUsername != user.Username {
+		if message := validateUsernameLength(newUsername); message != "" {
+			writeError(w, http.StatusBadRequest, message)
+			return
+		}
 		if currentPassword == "" {
 			writeError(w, http.StatusForbidden, "修改登录账号必须输入当前密码进行安全验证")
 			return
@@ -350,8 +426,8 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if newPassword != "" {
-		if len(newPassword) < 6 {
-			writeError(w, http.StatusBadRequest, "新密码至少需要 6 位")
+		if message := validatePasswordLength(newPassword); message != "" {
+			writeError(w, http.StatusBadRequest, message)
 			return
 		}
 		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
@@ -401,8 +477,8 @@ func handleSendCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	email := strings.ToLower(strings.TrimSpace(req.Email))
-	if !validateSupportedEmail(email) {
-		writeError(w, http.StatusForbidden, "抱歉，目前仅支持 QQ 或 Gmail 邮箱注册")
+	if message := validateEmailAddress(email); message != "" {
+		writeError(w, http.StatusForbidden, message)
 		return
 	}
 
@@ -809,6 +885,10 @@ func handleRecoverAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "邮箱和验证码不能为空")
 		return
 	}
+	if message := validateEmailAddress(email); message != "" {
+		writeError(w, http.StatusBadRequest, message)
+		return
+	}
 
 	if ok, message := verifyEmailCode(email, code); !ok {
 		writeError(w, http.StatusUnauthorized, message)
@@ -853,8 +933,12 @@ func handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "邮箱、验证码和新密码不能为空")
 		return
 	}
-	if len(newPassword) < 6 {
-		writeError(w, http.StatusBadRequest, "新密码至少需要 6 位")
+	if message := validateEmailAddress(email); message != "" {
+		writeError(w, http.StatusBadRequest, message)
+		return
+	}
+	if message := validatePasswordLength(newPassword); message != "" {
+		writeError(w, http.StatusBadRequest, message)
 		return
 	}
 
@@ -927,6 +1011,10 @@ func handleUpdateAdminProfile(w http.ResponseWriter, r *http.Request) {
 	oldUsername := admin.Username
 	usernameChanged := false
 	if newUsername != "" && newUsername != admin.Username {
+		if message := validateUsernameLength(newUsername); message != "" {
+			writeError(w, http.StatusBadRequest, message)
+			return
+		}
 		var existingUser User
 		if err := db.Where("username = ? AND uid <> ?", newUsername, admin.UID).First(&existingUser).Error; err == nil {
 			writeError(w, http.StatusBadRequest, "该管理员账号已被占用")
@@ -938,8 +1026,8 @@ func handleUpdateAdminProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if newEmail != "" && newEmail != admin.Email {
-		if !validateSupportedEmail(newEmail) {
-			writeError(w, http.StatusForbidden, "目前仅支持 QQ 或 Gmail 邮箱")
+		if message := validateEmailAddress(newEmail); message != "" {
+			writeError(w, http.StatusForbidden, message)
 			return
 		}
 		var existingUser User
@@ -955,8 +1043,8 @@ func handleUpdateAdminProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if newPassword != "" {
-		if len(newPassword) < 6 {
-			writeError(w, http.StatusBadRequest, "新密码至少需要 6 位")
+		if message := validatePasswordLength(newPassword); message != "" {
+			writeError(w, http.StatusBadRequest, message)
 			return
 		}
 		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
