@@ -38,6 +38,7 @@ type Post struct {
 	Nickname  string    `json:"nickname"` // ✨【新增】用于前端展示的昵称
 	Avatar    string    `json:"avatar"`
 	Content   string    `json:"content"`
+	Image     string    `json:"image"` // 新增：保存帖子图片的 dataURL，方便前端列表和详情页直接展示。
 	CreatedAt time.Time `json:"created_at"`
 
 	// 【虚拟字段】打上 gorm:"-" 标签，代表不存入帖子表，仅用于动态计算并传给前端
@@ -78,6 +79,7 @@ type CreatePostRequest struct {
 	Nickname string `json:"nickname"` // 接收前端传来的昵称
 	Avatar   string `json:"avatar"`
 	Content  string `json:"content"`
+	Image    string `json:"image"` // 新增：发帖时可选的图片，后端会校验格式和大小。
 }
 
 // 评论表

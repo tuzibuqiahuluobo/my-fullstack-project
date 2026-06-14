@@ -80,6 +80,12 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 	}
 }
 
+func TestValidatePasswordAllowsDotSpecialChar(t *testing.T) {
+	if message := validatePassword("Secret123."); message != "" {
+		t.Fatalf("期望点号可以作为密码特殊字符，实际错误: %s", message)
+	}
+}
+
 func TestRegisterRejectsInvalidInputLimits(t *testing.T) {
 	setupTestDB(t)
 
@@ -209,6 +215,83 @@ func TestProtectedEndpointRejectsAnonymousUser(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("期望状态码 401，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreatePostAllowsImageOnly(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	user := createTestUser(t, "image_user", 0)
+	token, err := generateToken(user)
+	if err != nil {
+		t.Fatalf("生成测试 token 失败: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodPost, "/api/create-post", map[string]string{
+		"image": "data:image/png;base64,aGVsbG8=",
+	})
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handleCreatePost(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望状态码 200，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+	var post Post
+	if err := db.First(&post).Error; err != nil {
+		t.Fatalf("期望图片帖子被保存，实际查询失败: %v", err)
+	}
+	if post.Image == "" {
+		t.Fatalf("期望保存帖子图片，实际为空")
+	}
+}
+
+func TestCreatePostRejectsEmptyContentAndImage(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	user := createTestUser(t, "empty_post_user", 0)
+	token, err := generateToken(user)
+	if err != nil {
+		t.Fatalf("生成测试 token 失败: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodPost, "/api/create-post", map[string]string{
+		"content": "   ",
+	})
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handleCreatePost(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("期望状态码 400，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreatePostRejectsInvalidImageData(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	user := createTestUser(t, "bad_image_user", 0)
+	token, err := generateToken(user)
+	if err != nil {
+		t.Fatalf("生成测试 token 失败: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodPost, "/api/create-post", map[string]string{
+		"content": "hello",
+		"image":   "data:image/png;base64,not-base64!!!",
+	})
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handleCreatePost(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("期望状态码 400，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
 	}
 }
 

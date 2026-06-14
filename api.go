@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -23,7 +24,16 @@ const (
 	passwordMinLength = 8
 	passwordMaxLength = 32
 	emailMaxLength    = 254
+	// 图片转成 base64 后会比原文件大约多三分之一，所以后端按 dataURL 长度给 3MB 余量。
+	postImageMaxLength = 3 * 1024 * 1024
 )
+
+var allowedPostImagePrefixes = []string{
+	"data:image/jpeg;base64,",
+	"data:image/png;base64,",
+	"data:image/webp;base64,",
+	"data:image/gif;base64,",
+}
 
 var sensitiveWords = []string{
 	"admin", "administrator", "root", "system", "official", "sunshine官方",
@@ -32,8 +42,8 @@ var sensitiveWords = []string{
 	"赌博", "博彩", "诈骗", "外挂", "代刷", "色情", "约炮", "毒品",
 }
 
-const passwordSpecialChars = "！!@#￥%*&"
-const passwordSpecialCharsText = "！@#￥%*&"
+const passwordSpecialChars = "！!@#￥%*&."
+const passwordSpecialCharsText = "！@#￥%*&."
 
 func textLength(value string) int {
 	// 用 rune 统计“字数”，中文、英文和常见符号都按用户直观看到的字符数量计算。
@@ -235,6 +245,28 @@ func clearEmailCode(email string) {
 	emailCodeMu.Lock()
 	delete(emailCodeMap, email)
 	emailCodeMu.Unlock()
+}
+
+func validatePostImage(image string) string {
+	if image == "" {
+		return ""
+	}
+	if len(image) > postImageMaxLength {
+		return "图片太大啦，请上传压缩后的 2MB 左右以内图片"
+	}
+
+	for _, prefix := range allowedPostImagePrefixes {
+		if strings.HasPrefix(image, prefix) {
+			// 只检查前缀不够安全，所以这里再解一次 base64，确认传来的确实是浏览器能识别的图片数据。
+			rawBase64 := strings.TrimPrefix(image, prefix)
+			if _, err := base64.StdEncoding.DecodeString(rawBase64); err != nil {
+				return "图片数据格式不正确，请重新选择图片"
+			}
+			return ""
+		}
+	}
+
+	return "图片格式只支持 JPG、PNG、WEBP 或 GIF"
 }
 
 func enrichPostForResponse(post *Post, currentUser User, hasLoginUser bool) {
@@ -636,8 +668,13 @@ func handleCreatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	content := strings.TrimSpace(req.Content)
-	if content == "" {
-		writeError(w, http.StatusBadRequest, "帖子内容不能为空")
+	image := strings.TrimSpace(req.Image)
+	if content == "" && image == "" {
+		writeError(w, http.StatusBadRequest, "帖子内容或图片至少要有一个")
+		return
+	}
+	if message := validatePostImage(image); message != "" {
+		writeError(w, http.StatusBadRequest, message)
 		return
 	}
 
@@ -646,6 +683,7 @@ func handleCreatePost(w http.ResponseWriter, r *http.Request) {
 		Nickname:  user.Nickname,
 		Avatar:    user.Avatar,
 		Content:   content,
+		Image:     image,
 		CreatedAt: time.Now(),
 	}
 
