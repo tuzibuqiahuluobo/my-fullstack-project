@@ -37,7 +37,9 @@ type Post struct {
 	Username  string    `json:"username"`
 	Nickname  string    `json:"nickname"` // ✨【新增】用于前端展示的昵称
 	Avatar    string    `json:"avatar"`
-	Title     string    `json:"title"` // 新增：帖子标题可以为空；为空时前端直接隐藏标题行。
+	TopicID   uint      `json:"topic_id" gorm:"index"` // 新增：帖子用 topic_id 绑定话题，查询某个社区时就能直接按这个字段过滤。
+	TagsRaw   string    `json:"-" gorm:"column:tags"`  // 新增：标签数量可变，用 JSON 字符串存入 SQLite，初学阶段比新建多对多表更容易理解。
+	Title     string    `json:"title"`                 // 新增：帖子标题可以为空；为空时前端直接隐藏标题行。
 	Content   string    `json:"content"`
 	Image     string    `json:"image"`                  // 兼容旧数据：旧版本只保存单张图片，新版本会继续返回第一张图。
 	ImagesRaw string    `json:"-" gorm:"column:images"` // 新增：多图用 JSON 字符串存入 SQLite，避免额外建表增加初学理解成本。
@@ -47,8 +49,31 @@ type Post struct {
 	Comments      []Comment `json:"comments" gorm:"-"`
 	FavoriteCount int64     `json:"favorite_count" gorm:"-"`
 	IsFavorited   bool      `json:"is_favorited" gorm:"-"`
-	Signature     string    `json:"signature" gorm:"-"` // 【新增】帖子表里不单独存签名，返回时读取作者当前签名
-	Images        []string  `json:"images" gorm:"-"`    // 新增：返回给前端的多图数组，不直接作为数据库字段。
+	TopicName     string    `json:"topic_name" gorm:"-"`   // 新增：返回给前端展示的话题名，不重复存入帖子表。
+	TopicStatus   string    `json:"topic_status" gorm:"-"` // 新增：详情页和后台可以知道该话题当前是否已停用。
+	Tags          []string  `json:"tags" gorm:"-"`         // 新增：返回给前端展示的标签数组，不直接作为数据库字段。
+	Signature     string    `json:"signature" gorm:"-"`    // 【新增】帖子表里不单独存签名，返回时读取作者当前签名
+	Images        []string  `json:"images" gorm:"-"`       // 新增：返回给前端的多图数组，不直接作为数据库字段。
+}
+
+const (
+	TopicStatusPending  = "pending"
+	TopicStatusApproved = "approved"
+	TopicStatusDisabled = "disabled"
+	TopicStatusRejected = "rejected"
+	DefaultTopicName    = "综合社区"
+)
+
+type Topic struct {
+	ID          uint      `json:"id" gorm:"primaryKey"`
+	Name        string    `json:"name" gorm:"uniqueIndex;size:40"`
+	Description string    `json:"description" gorm:"size:200"`
+	SortOrder   int       `json:"sort_order" gorm:"index"`
+	Status      string    `json:"status" gorm:"size:20;index"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+
+	PostCount int64 `json:"post_count" gorm:"-"` // 新增：只给后台/前台展示数量，不需要单独存数据库。
 }
 
 type VerifyCode struct {
@@ -79,18 +104,22 @@ type UpdateRequest struct {
 
 type CreatePostRequest struct {
 	Username string   `json:"username"`
+	TopicID  uint     `json:"topic_id"` // 新增：前端发布时必须告诉后端发到哪个话题社区。
 	Nickname string   `json:"nickname"` // 接收前端传来的昵称
 	Avatar   string   `json:"avatar"`
 	Title    string   `json:"title"`
 	Content  string   `json:"content"`
+	Tags     []string `json:"tags"`   // 新增：用户自定义标签，最多 5 个，和话题互相独立。
 	Image    string   `json:"image"`  // 兼容旧前端单图字段
 	Images   []string `json:"images"` // 新增：发帖时可选的多图数组，最多 9 张。
 }
 
 type UpdatePostRequest struct {
 	PostID  uint     `json:"post_id"`
+	TopicID uint     `json:"topic_id"` // 新增：编辑帖子时也允许把帖子移动到另一个已通过话题。
 	Title   string   `json:"title"`
 	Content string   `json:"content"`
+	Tags    []string `json:"tags"`   // 新增：编辑帖子时提交完整标签列表。
 	Image   string   `json:"image"`  // 兼容旧前端单图字段
 	Images  []string `json:"images"` // 新增：编辑帖子时提交完整图片列表。
 }
@@ -125,7 +154,8 @@ func initDB() {
 	}
 
 	// 同步表结构
-	db.AutoMigrate(&User{}, &Post{}, &Comment{}, &Favorite{})
+	db.AutoMigrate(&User{}, &Topic{}, &Post{}, &Comment{}, &Favorite{})
+	seedDefaultTopicsAndMigratePosts()
 
 	// 这三个默认值只方便本地学习时快速启动项目。
 	// 如果要部署到公网，请务必通过环境变量设置自己的账号、邮箱和强密码。
@@ -154,5 +184,30 @@ func initDB() {
 		}
 		db.Save(&superAdmin)
 		fmt.Println("🛡️ 超级管理员权限已确认！")
+	}
+}
+
+func seedDefaultTopicsAndMigratePosts() {
+	defaultTopics := []Topic{
+		{Name: DefaultTopicName, Description: "所有旧帖子和默认内容都会先放在这里。", SortOrder: 1, Status: TopicStatusApproved},
+		{Name: "日常分享", Description: "记录生活里的小事、心情和灵感。", SortOrder: 2, Status: TopicStatusApproved},
+		{Name: "学习交流", Description: "适合讨论学习笔记、技术问题和成长经验。", SortOrder: 3, Status: TopicStatusApproved},
+		{Name: "作品展示", Description: "展示绘画、文章、项目和其他创意作品。", SortOrder: 4, Status: TopicStatusApproved},
+		{Name: "问题求助", Description: "遇到问题时可以在这里向大家求助。", SortOrder: 5, Status: TopicStatusApproved},
+		{Name: "游戏交流", Description: "分享游戏体验、攻略和网页小游戏想法。", SortOrder: 6, Status: TopicStatusApproved},
+	}
+
+	for _, topic := range defaultTopics {
+		var existing Topic
+		if err := db.Where("name = ?", topic.Name).First(&existing).Error; err != nil {
+			// 新增：这里先查再创建，是为了避免每次后端启动都重复插入同名话题。
+			db.Create(&topic)
+		}
+	}
+
+	var general Topic
+	if err := db.Where("name = ?", DefaultTopicName).First(&general).Error; err == nil {
+		// 新增：老帖子以前没有 topic_id，统一迁到“综合社区”，升级后用户还能继续看到旧内容。
+		db.Model(&Post{}).Where("topic_id = ? OR topic_id IS NULL", 0).Update("topic_id", general.ID)
 	}
 }

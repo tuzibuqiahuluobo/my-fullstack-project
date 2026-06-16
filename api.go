@@ -27,6 +27,10 @@ const (
 	postTitleMaxLength   = 15
 	postContentMaxLength = 20000
 	postMaxImageCount    = 9
+	topicNameMaxLength   = 20
+	topicDescMaxLength   = 120
+	postMaxTagCount      = 5
+	postTagMaxLength     = 12
 	// 图片转成 base64 后会比原文件大约多三分之一，所以后端按 dataURL 长度给 3MB 余量。
 	postImageMaxLength = 3 * 1024 * 1024
 )
@@ -163,6 +167,72 @@ func publicUserPayload(user User) map[string]interface{} {
 		"avatar":    user.Avatar,
 		"role":      user.Role,
 	}
+}
+
+func isValidTopicStatus(status string) bool {
+	switch status {
+	case TopicStatusPending, TopicStatusApproved, TopicStatusDisabled, TopicStatusRejected:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateTopicInput(name string, description string, allowEmptyName bool) string {
+	name = strings.TrimSpace(name)
+	description = strings.TrimSpace(description)
+	if !allowEmptyName && name == "" {
+		return "话题名称不能为空"
+	}
+	if name != "" && textLength(name) > topicNameMaxLength {
+		return fmt.Sprintf("话题名称最多 %d 个字", topicNameMaxLength)
+	}
+	if textLength(description) > topicDescMaxLength {
+		return fmt.Sprintf("话题简介最多 %d 个字", topicDescMaxLength)
+	}
+	if name != "" {
+		if message := validateNoSensitiveWord("话题名称", name); message != "" {
+			return message
+		}
+	}
+	if description != "" {
+		if message := validateNoSensitiveWord("话题简介", description); message != "" {
+			return message
+		}
+	}
+	return ""
+}
+
+func fillTopicPostCount(topic *Topic) {
+	// 新增：帖子数量是实时统计值，不存在 topics 表里，避免每次发帖都要同步维护计数。
+	db.Model(&Post{}).Where("topic_id = ?", topic.ID).Count(&topic.PostCount)
+}
+
+func findDefaultTopic() (Topic, bool) {
+	var topic Topic
+	if err := db.Where("name = ?", DefaultTopicName).First(&topic).Error; err != nil {
+		return Topic{}, false
+	}
+	return topic, true
+}
+
+func approvedTopicForPost(topicID uint) (Topic, string) {
+	if topicID == 0 {
+		topic, ok := findDefaultTopic()
+		if !ok {
+			return Topic{}, "默认综合社区不存在，请联系管理员"
+		}
+		// 新增：兼容旧前端或旧数据，没传话题时自动进入“综合社区”，不会让用户的帖子丢失。
+		return topic, ""
+	}
+	var topic Topic
+	if err := db.First(&topic, topicID).Error; err != nil {
+		return Topic{}, "话题不存在或已被删除"
+	}
+	if topic.Status != TopicStatusApproved {
+		return Topic{}, "该话题暂不可发帖，请选择已通过的话题"
+	}
+	return topic, ""
 }
 
 func saveEmailCode(email string, code string) {
@@ -314,6 +384,55 @@ func encodePostImages(images []string) (string, error) {
 	return string(data), nil
 }
 
+func normalizePostTags(tags []string) ([]string, string) {
+	normalized := make([]string, 0, postMaxTagCount)
+	seen := map[string]bool{}
+	for _, tag := range tags {
+		tag = strings.TrimSpace(strings.TrimPrefix(tag, "#"))
+		if tag == "" {
+			continue
+		}
+		if textLength(tag) > postTagMaxLength {
+			return nil, fmt.Sprintf("每个标签最多 %d 个字", postTagMaxLength)
+		}
+		if message := validateNoSensitiveWord("标签", tag); message != "" {
+			return nil, message
+		}
+		key := strings.ToLower(tag)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		normalized = append(normalized, tag)
+		if len(normalized) > postMaxTagCount {
+			return nil, fmt.Sprintf("帖子标签最多添加 %d 个", postMaxTagCount)
+		}
+	}
+	return normalized, ""
+}
+
+func encodePostTags(tags []string) (string, error) {
+	if len(tags) == 0 {
+		return "", nil
+	}
+	// 新增：标签和图片一样用 JSON 保存，读取时再还原，避免为初学项目过早引入复杂关联表。
+	data, err := json.Marshal(tags)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func fillPostTagsForResponse(post *Post) {
+	tags := []string{}
+	if strings.TrimSpace(post.TagsRaw) != "" {
+		if err := json.Unmarshal([]byte(post.TagsRaw), &tags); err != nil {
+			tags = []string{}
+		}
+	}
+	post.Tags = tags
+}
+
 func fillPostImagesForResponse(post *Post) {
 	images := make([]string, 0, postMaxImageCount)
 	if strings.TrimSpace(post.ImagesRaw) != "" {
@@ -344,6 +463,12 @@ func enrichPostForResponse(post *Post, currentUser User, hasLoginUser bool) {
 	}
 
 	// 帖子详情、社区列表、我的收藏都需要这些展示数据，集中到这里避免三处写重复逻辑。
+	var topic Topic
+	if err := db.First(&topic, post.TopicID).Error; err == nil {
+		// 新增：帖子表只存 topic_id，返回前再补全话题名称，避免话题改名后旧帖子展示旧名字。
+		post.TopicName = topic.Name
+		post.TopicStatus = topic.Status
+	}
 	db.Where("post_id = ?", post.ID).Order("created_at asc").Find(&post.Comments)
 	db.Model(&Favorite{}).Where("post_id = ?", post.ID).Count(&post.FavoriteCount)
 	post.IsFavorited = false
@@ -354,6 +479,7 @@ func enrichPostForResponse(post *Post, currentUser User, hasLoginUser bool) {
 		}
 	}
 	fillPostImagesForResponse(post)
+	fillPostTagsForResponse(post)
 }
 
 // ---------------------------------------------------------
@@ -665,6 +791,234 @@ func handleSendCode(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------
 // 5. 获取帖子列表接口
 // ---------------------------------------------------------
+func handleGetTopics(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
+	var topics []Topic
+	if err := db.Where("status = ?", TopicStatusApproved).Order("sort_order asc, id asc").Find(&topics).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "话题列表读取失败")
+		return
+	}
+	for i := range topics {
+		fillTopicPostCount(&topics[i])
+	}
+	writeJSON(w, http.StatusOK, topics)
+}
+
+func handleAdminGetTopics(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+
+	var topics []Topic
+	if err := db.Order("sort_order asc, id asc").Find(&topics).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "话题列表读取失败")
+		return
+	}
+	for i := range topics {
+		fillTopicPostCount(&topics[i])
+	}
+	writeJSON(w, http.StatusOK, topics)
+}
+
+func handleAdminCreateTopic(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+
+	var req struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		SortOrder   int    `json:"sort_order"`
+		Status      string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "数据格式不对")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	description := strings.TrimSpace(req.Description)
+	status := strings.TrimSpace(req.Status)
+	if status == "" {
+		status = TopicStatusApproved
+	}
+	if !isValidTopicStatus(status) {
+		writeError(w, http.StatusBadRequest, "话题状态不正确")
+		return
+	}
+	if message := validateTopicInput(name, description, false); message != "" {
+		writeError(w, http.StatusBadRequest, message)
+		return
+	}
+	var existing Topic
+	if err := db.Where("name = ?", name).First(&existing).Error; err == nil {
+		writeError(w, http.StatusBadRequest, "话题名称已存在")
+		return
+	}
+	if req.SortOrder <= 0 {
+		req.SortOrder = 100
+	}
+
+	topic := Topic{Name: name, Description: description, SortOrder: req.SortOrder, Status: status}
+	if err := db.Create(&topic).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "话题创建失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"message": "话题已创建", "topic": topic})
+}
+
+func handleAdminUpdateTopic(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+
+	var req struct {
+		TopicID     uint   `json:"topic_id"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		SortOrder   int    `json:"sort_order"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "数据格式不对")
+		return
+	}
+	if req.TopicID == 0 {
+		writeError(w, http.StatusBadRequest, "话题 ID 不正确")
+		return
+	}
+
+	var topic Topic
+	if err := db.First(&topic, req.TopicID).Error; err != nil {
+		writeError(w, http.StatusNotFound, "话题不存在或已被删除")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	description := strings.TrimSpace(req.Description)
+	if topic.Name == DefaultTopicName {
+		// 新增：综合社区是系统兜底话题，不能改名，否则旧帖迁移和默认入口都会失去稳定目标。
+		name = topic.Name
+	}
+	if message := validateTopicInput(name, description, false); message != "" {
+		writeError(w, http.StatusBadRequest, message)
+		return
+	}
+	if name != topic.Name {
+		var existing Topic
+		if err := db.Where("name = ? AND id <> ?", name, topic.ID).First(&existing).Error; err == nil {
+			writeError(w, http.StatusBadRequest, "话题名称已存在")
+			return
+		}
+		topic.Name = name
+	}
+	topic.Description = description
+	topic.SortOrder = req.SortOrder
+	if topic.SortOrder <= 0 {
+		topic.SortOrder = 100
+	}
+
+	if err := db.Save(&topic).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "话题保存失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "话题已保存"})
+}
+
+func handleAdminReviewTopic(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+
+	var req struct {
+		TopicID uint   `json:"topic_id"`
+		Status  string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "数据格式不对")
+		return
+	}
+	status := strings.TrimSpace(req.Status)
+	if req.TopicID == 0 || !isValidTopicStatus(status) {
+		writeError(w, http.StatusBadRequest, "话题审核参数不正确")
+		return
+	}
+
+	var topic Topic
+	if err := db.First(&topic, req.TopicID).Error; err != nil {
+		writeError(w, http.StatusNotFound, "话题不存在或已被删除")
+		return
+	}
+	if topic.Name == DefaultTopicName && status != TopicStatusApproved {
+		writeError(w, http.StatusForbidden, "综合社区不能停用、拒绝或设为待审核")
+		return
+	}
+	topic.Status = status
+	if err := db.Save(&topic).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "话题审核状态保存失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "话题状态已更新"})
+}
+
+func handleAdminDeleteTopic(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+
+	var req struct {
+		TopicID uint `json:"topic_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "数据格式不对")
+		return
+	}
+	if req.TopicID == 0 {
+		writeError(w, http.StatusBadRequest, "话题 ID 不正确")
+		return
+	}
+
+	var topic Topic
+	if err := db.First(&topic, req.TopicID).Error; err != nil {
+		writeError(w, http.StatusNotFound, "话题不存在或已被删除")
+		return
+	}
+	if topic.Name == DefaultTopicName {
+		writeError(w, http.StatusForbidden, "综合社区不能删除")
+		return
+	}
+
+	general, ok := findDefaultTopic()
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "默认话题不存在，请联系管理员")
+		return
+	}
+	// 新增：删除话题前先把帖子迁移到综合社区，这样不会因为删话题导致帖子丢失。
+	db.Model(&Post{}).Where("topic_id = ?", topic.ID).Update("topic_id", general.ID)
+	if err := db.Delete(&topic).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "话题删除失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "话题已删除，原话题帖子已迁移到综合社区"})
+}
+
 func handleGetPosts(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
@@ -672,8 +1026,42 @@ func handleGetPosts(w http.ResponseWriter, r *http.Request) {
 
 	currentUser, hasLoginUser := currentUserFromRequest(r)
 
+	query := db.Order("created_at desc")
+	if strings.TrimSpace(r.URL.Query().Get("all")) == "1" {
+		if _, ok := requireAdmin(w, r); !ok {
+			return
+		}
+	} else {
+		topicIDValue := strings.TrimSpace(r.URL.Query().Get("topic_id"))
+		var topic Topic
+		if topicIDValue == "" {
+			var ok bool
+			topic, ok = findDefaultTopic()
+			if !ok {
+				writeError(w, http.StatusInternalServerError, "默认话题不存在，请联系管理员")
+				return
+			}
+		} else {
+			topicID, err := strconv.Atoi(topicIDValue)
+			if err != nil || topicID <= 0 {
+				writeError(w, http.StatusBadRequest, "话题 ID 不正确")
+				return
+			}
+			if err := db.First(&topic, uint(topicID)).Error; err != nil {
+				writeError(w, http.StatusNotFound, "话题不存在或已被删除")
+				return
+			}
+		}
+		if topic.Status != TopicStatusApproved {
+			writeError(w, http.StatusForbidden, "该话题暂不可访问")
+			return
+		}
+		// 新增：社区列表只查当前话题，避免不同社区的帖子混在一起。
+		query = query.Where("topic_id = ?", topic.ID)
+	}
+
 	var posts []Post
-	if err := db.Order("created_at desc").Find(&posts).Error; err != nil {
+	if err := query.Find(&posts).Error; err != nil {
 		writeError(w, http.StatusInternalServerError, "帖子读取失败")
 		return
 	}
@@ -733,6 +1121,16 @@ func handleCreatePost(w http.ResponseWriter, r *http.Request) {
 	title := strings.TrimSpace(req.Title)
 	content := strings.TrimSpace(req.Content)
 	images := normalizePostImages(req.Images, req.Image)
+	tags, tagMessage := normalizePostTags(req.Tags)
+	if tagMessage != "" {
+		writeError(w, http.StatusBadRequest, tagMessage)
+		return
+	}
+	topic, topicMessage := approvedTopicForPost(req.TopicID)
+	if topicMessage != "" {
+		writeError(w, http.StatusBadRequest, topicMessage)
+		return
+	}
 	if title != "" && textLength(title) > postTitleMaxLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("帖子标题最多 %d 个字", postTitleMaxLength))
 		return
@@ -754,15 +1152,22 @@ func handleCreatePost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "图片数据保存格式不正确")
 		return
 	}
+	tagsRaw, err := encodePostTags(tags)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "标签保存格式不正确")
+		return
+	}
 
 	newPost := Post{
 		Username:  user.Username,
 		Nickname:  user.Nickname,
 		Avatar:    user.Avatar,
+		TopicID:   topic.ID,
 		Title:     title,
 		Content:   content,
 		Image:     "",
 		ImagesRaw: imagesRaw,
+		TagsRaw:   tagsRaw,
 		CreatedAt: time.Now(),
 	}
 	if len(images) > 0 {
@@ -813,6 +1218,16 @@ func handleUpdatePost(w http.ResponseWriter, r *http.Request) {
 	title := strings.TrimSpace(req.Title)
 	content := strings.TrimSpace(req.Content)
 	images := normalizePostImages(req.Images, req.Image)
+	tags, tagMessage := normalizePostTags(req.Tags)
+	if tagMessage != "" {
+		writeError(w, http.StatusBadRequest, tagMessage)
+		return
+	}
+	topic, topicMessage := approvedTopicForPost(req.TopicID)
+	if topicMessage != "" {
+		writeError(w, http.StatusBadRequest, topicMessage)
+		return
+	}
 	if title != "" && textLength(title) > postTitleMaxLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("帖子标题最多 %d 个字", postTitleMaxLength))
 		return
@@ -834,10 +1249,17 @@ func handleUpdatePost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "图片数据保存格式不正确")
 		return
 	}
+	tagsRaw, err := encodePostTags(tags)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "标签保存格式不正确")
+		return
+	}
 
 	post.Title = title
+	post.TopicID = topic.ID
 	post.Content = content
 	post.ImagesRaw = imagesRaw
+	post.TagsRaw = tagsRaw
 	post.Image = ""
 	if len(images) > 0 {
 		post.Image = images[0]
