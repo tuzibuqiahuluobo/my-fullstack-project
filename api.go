@@ -23,6 +23,8 @@ const (
 	nicknameMaxLength    = 15
 	passwordMinLength    = 8
 	passwordMaxLength    = 32
+	loginUsernameMaxLen  = 254
+	loginPasswordMaxLen  = 512
 	emailMaxLength       = 254
 	postTitleMaxLength   = 15
 	postContentMaxLength = 20000
@@ -140,6 +142,18 @@ func validatePassword(password string) string {
 	}
 	if !hasUpper || !hasLower || !hasDigit {
 		return "密码需要同时包含大写字母、小写字母和数字"
+	}
+	return ""
+}
+
+func validateLoginInput(username string, password string) string {
+	// 登录只验证“能不能拿来查账号”，不套用注册规则。
+	// 原因是超级管理员账号可能来自 .env，例如 superadmin/root，普通注册规则会把这些名字当敏感词拦掉。
+	if textLength(username) > loginUsernameMaxLen {
+		return "账号长度异常，请检查输入"
+	}
+	if textLength(password) > loginPasswordMaxLen {
+		return "密码长度异常，请检查输入"
 	}
 	return ""
 }
@@ -582,11 +596,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "用户名和密码不能为空")
 		return
 	}
-	if message := validateUsername(req.Username); message != "" {
-		writeError(w, http.StatusBadRequest, message)
-		return
-	}
-	if message := validatePassword(req.Password); message != "" {
+	if message := validateLoginInput(req.Username, req.Password); message != "" {
 		writeError(w, http.StatusBadRequest, message)
 		return
 	}

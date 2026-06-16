@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -162,23 +164,43 @@ func initDB() {
 	SuperAdminUsername := getEnv("SUPER_ADMIN_USERNAME", "superadmin")
 	SuperAdminEmail := getEnv("SUPER_ADMIN_EMAIL", "2672172829@qq.com")
 	SuperAdminPassword := getEnv("SUPER_ADMIN_PASSWORD", "ASDasd5201314.")
+	hasConfiguredAdminUsername := strings.TrimSpace(os.Getenv("SUPER_ADMIN_USERNAME")) != ""
+	hasConfiguredAdminEmail := strings.TrimSpace(os.Getenv("SUPER_ADMIN_EMAIL")) != ""
+	hasConfiguredAdminPassword := strings.TrimSpace(os.Getenv("SUPER_ADMIN_PASSWORD")) != ""
 
+	ensureSuperAdminAccount(SuperAdminUsername, SuperAdminEmail, SuperAdminPassword, hasConfiguredAdminUsername, hasConfiguredAdminEmail, hasConfiguredAdminPassword)
+}
+
+func ensureSuperAdminAccount(superAdminUsername string, superAdminEmail string, superAdminPassword string, hasConfiguredUsername bool, hasConfiguredEmail bool, hasConfiguredPassword bool) {
+	// 新增：把超级管理员同步逻辑抽出来，测试和真实启动都能复用同一套规则。
+	// 这样之后再改 .env 生效方式时，不容易出现“测试通过但启动逻辑忘记改”的问题。
 	var superAdmin User
 	if result := db.Where("role = ?", 2).First(&superAdmin); result.Error != nil {
-		hash, _ := bcrypt.GenerateFromPassword([]byte(SuperAdminPassword), bcrypt.DefaultCost)
+		hash, _ := bcrypt.GenerateFromPassword([]byte(superAdminPassword), bcrypt.DefaultCost)
 		db.Create(&User{
-			Username:     SuperAdminUsername,
-			Nickname:     SuperAdminUsername, // 新增
-			Email:        SuperAdminEmail,
+			Username:     superAdminUsername,
+			Nickname:     superAdminUsername, // 新增
+			Email:        superAdminEmail,
 			PasswordHash: string(hash),
 			Role:         2,
 			Avatar:       "https://api.dicebear.com/7.x/adventurer/svg?seed=Admin",
 		})
 		fmt.Println("👑 超级管理员账号已自动生成！")
 	} else {
-		// 已经存在超级管理员时，只修复权限和缺失头像，不覆盖后台里手动改过的账号、邮箱或密码。
-		// 如果想完全重置管理员，删除 data.db 后重新启动即可按环境变量重新生成。
+		// 已经存在超级管理员时，默认不覆盖后台手动改过的信息。
+		// 但如果 .env 里明确写了 SUPER_ADMIN_*，就同步这些配置，方便部署后直接用自己设置的账号密码登录。
 		superAdmin.Role = 2
+		if hasConfiguredUsername {
+			superAdmin.Username = superAdminUsername
+			superAdmin.Nickname = superAdminUsername
+		}
+		if hasConfiguredEmail {
+			superAdmin.Email = superAdminEmail
+		}
+		if hasConfiguredPassword {
+			hash, _ := bcrypt.GenerateFromPassword([]byte(superAdminPassword), bcrypt.DefaultCost)
+			superAdmin.PasswordHash = string(hash)
+		}
 		if superAdmin.Avatar == "" {
 			superAdmin.Avatar = "https://api.dicebear.com/7.x/adventurer/svg?seed=Admin"
 		}

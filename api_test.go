@@ -91,6 +91,70 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 	}
 }
 
+func TestLoginAllowsConfiguredSuperAdminUsername(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("AdminRootPassword"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("生成管理员密码哈希失败: %v", err)
+	}
+	admin := User{
+		Username:     "superadmin",
+		Nickname:     "superadmin",
+		Email:        "admin@qq.com",
+		PasswordHash: string(passwordHash),
+		Role:         2,
+	}
+	if err := db.Create(&admin).Error; err != nil {
+		t.Fatalf("创建管理员失败: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodPost, "/api/login", map[string]string{
+		"username": "superadmin",
+		"password": "AdminRootPassword",
+	})
+	rec := httptest.NewRecorder()
+
+	handleLogin(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("超级管理员账号不应被普通账号规则拦截，状态码 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestEnsureSuperAdminSyncsExplicitConfig(t *testing.T) {
+	setupTestDB(t)
+
+	oldHash, err := bcrypt.GenerateFromPassword([]byte("OldPassword123"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("生成旧密码哈希失败: %v", err)
+	}
+	admin := User{
+		Username:     "oldadmin",
+		Nickname:     "oldadmin",
+		Email:        "old@qq.com",
+		PasswordHash: string(oldHash),
+		Role:         2,
+	}
+	if err := db.Create(&admin).Error; err != nil {
+		t.Fatalf("创建旧管理员失败: %v", err)
+	}
+
+	ensureSuperAdminAccount("superadmin", "newadmin@qq.com", "EnvPassword123", true, true, true)
+
+	var updated User
+	if err := db.Where("role = ?", 2).First(&updated).Error; err != nil {
+		t.Fatalf("读取同步后的管理员失败: %v", err)
+	}
+	if updated.Username != "superadmin" || updated.Email != "newadmin@qq.com" {
+		t.Fatalf("期望管理员同步 .env 配置，实际账号=%q 邮箱=%q", updated.Username, updated.Email)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(updated.PasswordHash), []byte("EnvPassword123")); err != nil {
+		t.Fatalf("期望管理员密码同步为 .env 中的新密码")
+	}
+}
+
 func TestValidatePasswordAllowsDotSpecialChar(t *testing.T) {
 	if message := validatePassword("Secret123."); message != "" {
 		t.Fatalf("期望点号可以作为密码特殊字符，实际错误: %s", message)
