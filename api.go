@@ -464,6 +464,28 @@ func fillPostImagesForResponse(post *Post) {
 	}
 }
 
+func fillCommentImagesForResponse(comment *Comment) {
+	images := make([]string, 0, postMaxImageCount)
+	if strings.TrimSpace(comment.ImagesRaw) != "" {
+		if err := json.Unmarshal([]byte(comment.ImagesRaw), &images); err != nil {
+			images = []string{}
+		}
+	}
+	comment.Images = images
+}
+
+func enrichCommentForResponse(comment *Comment) {
+	// 新增：评论回复只保存 parent_id，读取时再补父评论昵称，这样父评论作者改昵称后回复提示也能跟着变。
+	if comment.ParentID != 0 {
+		var parent Comment
+		if err := db.First(&parent, comment.ParentID).Error; err == nil && parent.PostID == comment.PostID {
+			comment.ReplyToUsername = parent.Username
+			comment.ReplyToNickname = parent.Nickname
+		}
+	}
+	fillCommentImagesForResponse(comment)
+}
+
 func enrichPostForResponse(post *Post, currentUser User, hasLoginUser bool) {
 	var author User
 	if err := db.Where("username = ?", post.Username).First(&author).Error; err == nil {
@@ -484,6 +506,9 @@ func enrichPostForResponse(post *Post, currentUser User, hasLoginUser bool) {
 		post.TopicStatus = topic.Status
 	}
 	db.Where("post_id = ?", post.ID).Order("created_at asc").Find(&post.Comments)
+	for i := 0; i < len(post.Comments); i++ {
+		enrichCommentForResponse(&post.Comments[i])
+	}
 	db.Model(&Favorite{}).Where("post_id = ?", post.ID).Count(&post.FavoriteCount)
 	post.IsFavorited = false
 	if hasLoginUser {
@@ -753,6 +778,8 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 		db.Model(&Post{}).Where("username = ?", oldUsername).Update("username", user.Username)
 		db.Model(&Comment{}).Where("username = ?", oldUsername).Update("username", user.Username)
 	}
+	// 新增：评论表里保存了一份当时的昵称用于列表展示；用户改昵称后同步历史评论，页面刷新后就能看到新昵称。
+	db.Model(&Comment{}).Where("username = ?", user.Username).Update("nickname", user.Nickname)
 
 	token, err := generateToken(user)
 	if err != nil {
@@ -1399,18 +1426,16 @@ func handleCreateComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		PostID  uint   `json:"post_id"`
-		Content string `json:"content"`
-	}
+	var req CreateCommentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "数据格式不对")
 		return
 	}
 
 	content := strings.TrimSpace(req.Content)
-	if content == "" {
-		writeError(w, http.StatusBadRequest, "评论内容不能为空")
+	images := normalizePostImages(req.Images, req.Image)
+	if content == "" && len(images) == 0 {
+		writeError(w, http.StatusBadRequest, "评论内容或图片至少要有一个")
 		return
 	}
 
@@ -1420,12 +1445,32 @@ func handleCreateComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	parentID := req.ParentID
+	if parentID != 0 {
+		var parent Comment
+		if err := db.First(&parent, parentID).Error; err != nil || parent.PostID != req.PostID {
+			writeError(w, http.StatusBadRequest, "回复的评论不存在，或不属于当前帖子")
+			return
+		}
+	}
+	if message := validatePostImages(images); message != "" {
+		writeError(w, http.StatusBadRequest, message)
+		return
+	}
+	imagesRaw, err := encodePostImages(images)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "评论图片保存格式不正确")
+		return
+	}
+
 	comment := Comment{
 		PostID:    req.PostID,
+		ParentID:  parentID,
 		Username:  user.Username,
 		Nickname:  user.Nickname,
 		Avatar:    user.Avatar,
 		Content:   content,
+		ImagesRaw: imagesRaw,
 		CreatedAt: time.Now(),
 	}
 
@@ -1434,7 +1479,8 @@ func handleCreateComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"message": "评论成功！"})
+	enrichCommentForResponse(&comment)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"message": "评论成功！", "comment": comment})
 }
 
 // ---------------------------------------------------------
@@ -1765,6 +1811,8 @@ func handleUpdateAdminProfile(w http.ResponseWriter, r *http.Request) {
 		db.Model(&Post{}).Where("username = ?", oldUsername).Update("username", admin.Username)
 		db.Model(&Comment{}).Where("username = ?", oldUsername).Update("username", admin.Username)
 	}
+	// 新增：管理员账号名改动时昵称也会跟着改，这里同步历史评论里的显示名。
+	db.Model(&Comment{}).Where("username = ?", admin.Username).Update("nickname", admin.Nickname)
 
 	token, err := generateToken(admin)
 	if err != nil {

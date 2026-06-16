@@ -129,12 +129,26 @@ type UpdatePostRequest struct {
 // 评论表
 type Comment struct {
 	ID        uint      `json:"id" gorm:"primaryKey"`
-	PostID    uint      `json:"post_id" gorm:"index"` // 建立索引提升查询性能
-	Username  string    `json:"username"`             // 评论人账号
-	Nickname  string    `json:"nickname"`             // 评论人昵称
-	Avatar    string    `json:"avatar"`               // 评论人头像
-	Content   string    `json:"content"`              // 评论内容
+	PostID    uint      `json:"post_id" gorm:"index"`   // 建立索引提升查询性能
+	ParentID  uint      `json:"parent_id" gorm:"index"` // 新增：回复某条评论时记录父评论 ID，0 代表直接评论帖子。
+	Username  string    `json:"username"`               // 评论人账号
+	Nickname  string    `json:"nickname"`               // 评论人昵称
+	Avatar    string    `json:"avatar"`                 // 评论人头像
+	Content   string    `json:"content"`                // 评论内容
+	ImagesRaw string    `json:"-" gorm:"column:images"` // 新增：评论图片也用 JSON 字符串保存，和帖子多图规则保持一致。
 	CreatedAt time.Time `json:"created_at"`
+
+	ReplyToUsername string   `json:"reply_to_username" gorm:"-"` // 新增：返回给前端展示“回复了谁”，不额外存数据库。
+	ReplyToNickname string   `json:"reply_to_nickname" gorm:"-"` // 新增：昵称可能变化，读取时根据父评论实时补上。
+	Images          []string `json:"images" gorm:"-"`            // 新增：返回给前端展示的评论图片数组。
+}
+
+type CreateCommentRequest struct {
+	PostID   uint     `json:"post_id"`
+	ParentID uint     `json:"parent_id"` // 新增：为 0 时是普通评论，不为 0 时就是回复某条评论。
+	Content  string   `json:"content"`
+	Image    string   `json:"image"`  // 兼容以后可能出现的单图字段
+	Images   []string `json:"images"` // 新增：评论区复用帖子图片系统，最多 9 张。
 }
 
 // 收藏表 (联合主键，防止重复收藏)

@@ -267,6 +267,49 @@ func TestUpdateRejectsSensitiveSignature(t *testing.T) {
 	}
 }
 
+func TestUpdateNicknameSyncsOldComments(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	user := createTestUser(t, "comment_user", 0)
+	user.Nickname = "旧昵称"
+	if err := db.Save(&user).Error; err != nil {
+		t.Fatalf("保存旧昵称失败: %v", err)
+	}
+	comment := Comment{
+		PostID:   1,
+		Username: user.Username,
+		Nickname: user.Nickname,
+		Content:  "这是一条历史评论",
+	}
+	if err := db.Create(&comment).Error; err != nil {
+		t.Fatalf("创建历史评论失败: %v", err)
+	}
+	token, err := generateToken(user)
+	if err != nil {
+		t.Fatalf("生成测试 token 失败: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodPost, "/api/update", map[string]string{
+		"nickname": "新昵称",
+	})
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handleUpdate(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望状态码 200，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+	var updated Comment
+	if err := db.First(&updated, comment.ID).Error; err != nil {
+		t.Fatalf("读取同步后的评论失败: %v", err)
+	}
+	if updated.Nickname != "新昵称" {
+		t.Fatalf("期望历史评论昵称同步为新昵称，实际得到 %q", updated.Nickname)
+	}
+}
+
 func TestRequireMethodRejectsWrongMethod(t *testing.T) {
 	req := newJSONRequest(t, http.MethodGet, "/api/login", nil)
 	rec := httptest.NewRecorder()
@@ -358,6 +401,86 @@ func TestCreatePostAllowsMultipleImages(t *testing.T) {
 	enrichPostForResponse(&post, user, true)
 	if post.Title != "旅行记录" || len(post.Images) != 2 {
 		t.Fatalf("期望保存标题和 2 张图片，实际标题=%q 图片数=%d", post.Title, len(post.Images))
+	}
+}
+
+func TestCreateCommentSupportsReplyAndImages(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	user := createTestUser(t, "reply_user", 0)
+	token, err := generateToken(user)
+	if err != nil {
+		t.Fatalf("生成测试 token 失败: %v", err)
+	}
+	post := Post{Username: user.Username, TopicID: defaultTopicID(t), Content: "hello"}
+	if err := db.Create(&post).Error; err != nil {
+		t.Fatalf("创建测试帖子失败: %v", err)
+	}
+	parent := Comment{PostID: post.ID, Username: user.Username, Nickname: "楼主", Content: "父评论"}
+	if err := db.Create(&parent).Error; err != nil {
+		t.Fatalf("创建父评论失败: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodPost, "/api/create-comment", map[string]interface{}{
+		"post_id":   post.ID,
+		"parent_id": parent.ID,
+		"content":   "回复内容",
+		"images":    []string{"data:image/png;base64,aGVsbG8="},
+	})
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handleCreateComment(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望状态码 200，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Comment Comment `json:"comment"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析评论响应失败: %v", err)
+	}
+	if body.Comment.ParentID != parent.ID || body.Comment.ReplyToNickname != "楼主" || len(body.Comment.Images) != 1 {
+		t.Fatalf("期望回复关系和图片被返回，实际: %+v", body.Comment)
+	}
+}
+
+func TestCreateCommentRejectsParentFromOtherPost(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	user := createTestUser(t, "bad_reply_user", 0)
+	token, err := generateToken(user)
+	if err != nil {
+		t.Fatalf("生成测试 token 失败: %v", err)
+	}
+	postA := Post{Username: user.Username, TopicID: defaultTopicID(t), Content: "a"}
+	postB := Post{Username: user.Username, TopicID: defaultTopicID(t), Content: "b"}
+	if err := db.Create(&postA).Error; err != nil {
+		t.Fatalf("创建帖子 A 失败: %v", err)
+	}
+	if err := db.Create(&postB).Error; err != nil {
+		t.Fatalf("创建帖子 B 失败: %v", err)
+	}
+	parent := Comment{PostID: postB.ID, Username: user.Username, Nickname: user.Nickname, Content: "另一个帖子的评论"}
+	if err := db.Create(&parent).Error; err != nil {
+		t.Fatalf("创建父评论失败: %v", err)
+	}
+
+	req := newJSONRequest(t, http.MethodPost, "/api/create-comment", map[string]interface{}{
+		"post_id":   postA.ID,
+		"parent_id": parent.ID,
+		"content":   "错误回复",
+	})
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handleCreateComment(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("期望状态码 400，实际得到 %d，响应: %s", rec.Code, rec.Body.String())
 	}
 }
 
