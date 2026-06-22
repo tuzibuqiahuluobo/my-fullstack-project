@@ -32,12 +32,17 @@ type User struct {
 	UsernameUpdatedAt time.Time `json:"username_updated_at"` // 【新增】记录上次修改用户名的时间
 	Nickname          string    `json:"nickname"`            // 【新增】用户昵称
 	Signature         string    `json:"signature"`           // 【新增】个性签名，最多 50 个字
+	ProfileBackground string    `json:"profile_background"`  // 新增：保存个人背景图，别人访问主页时也能看到同一张图。
+	ThemeColorStart   string    `json:"theme_color_start"`   // 新增：主题渐变起始色，用来统一按钮和菜单的个性颜色。
+	ThemeColorEnd     string    `json:"theme_color_end"`     // 新增：主题渐变结束色，两种颜色组合后可以形成渐变。
+	ThemeOpacity      float64   `json:"theme_opacity"`       // 新增：背景遮罩透明度，避免背景图太花影响文字阅读。
 }
 
 type Post struct {
 	ID        uint      `json:"id" gorm:"primaryKey"`
 	Username  string    `json:"username"`
-	Nickname  string    `json:"nickname"` // ✨【新增】用于前端展示的昵称
+	AuthorUID uint      `json:"author_uid" gorm:"-"` // 新增：只返回给前端跳转个人主页，不写入帖子表。
+	Nickname  string    `json:"nickname"`            // ✨【新增】用于前端展示的昵称
 	Avatar    string    `json:"avatar"`
 	TopicID   uint      `json:"topic_id" gorm:"index"` // 新增：帖子用 topic_id 绑定话题，查询某个社区时就能直接按这个字段过滤。
 	TagsRaw   string    `json:"-" gorm:"column:tags"`  // 新增：标签数量可变，用 JSON 字符串存入 SQLite，初学阶段比新建多对多表更容易理解。
@@ -94,14 +99,18 @@ type RegisterRequest struct {
 }
 
 type UpdateRequest struct {
-	UID             uint    `json:"uid"`
-	Username        string  `json:"username"`
-	Avatar          string  `json:"avatar"`
-	Password        string  `json:"password"`
-	Nickname        string  `json:"nickname"`         // 【新增】前端传来的新昵称
-	Signature       *string `json:"signature"`        // 【新增】指针可以区分“没传”和“传了空字符串清空签名”
-	NewUsername     string  `json:"new_username"`     // 【新增】想要修改的新用户名
-	CurrentPassword string  `json:"current_password"` // 【新增】修改用户名时必须提供的当前密码验证
+	UID               uint     `json:"uid"`
+	Username          string   `json:"username"`
+	Avatar            string   `json:"avatar"`
+	Password          string   `json:"password"`
+	Nickname          string   `json:"nickname"`           // 【新增】前端传来的新昵称
+	Signature         *string  `json:"signature"`          // 【新增】指针可以区分“没传”和“传了空字符串清空签名”
+	ProfileBackground *string  `json:"profile_background"` // 新增：允许清空背景，所以也用指针区分是否提交。
+	ThemeColorStart   string   `json:"theme_color_start"`  // 新增：前端调色盘选择的第一种主题色。
+	ThemeColorEnd     string   `json:"theme_color_end"`    // 新增：前端调色盘选择的第二种主题色。
+	ThemeOpacity      *float64 `json:"theme_opacity"`      // 新增：透明度可以是 0，所以用指针判断是否提交。
+	NewUsername       string   `json:"new_username"`       // 【新增】想要修改的新用户名
+	CurrentPassword   string   `json:"current_password"`   // 【新增】修改用户名时必须提供的当前密码验证
 }
 
 type CreatePostRequest struct {
@@ -132,6 +141,7 @@ type Comment struct {
 	PostID    uint      `json:"post_id" gorm:"index"`   // 建立索引提升查询性能
 	ParentID  uint      `json:"parent_id" gorm:"index"` // 新增：回复某条评论时记录父评论 ID，0 代表直接评论帖子。
 	Username  string    `json:"username"`               // 评论人账号
+	AuthorUID uint      `json:"author_uid" gorm:"-"`    // 新增：只返回给前端跳转个人主页，不写入评论表。
 	Nickname  string    `json:"nickname"`               // 评论人昵称
 	Avatar    string    `json:"avatar"`                 // 评论人头像
 	Content   string    `json:"content"`                // 评论内容

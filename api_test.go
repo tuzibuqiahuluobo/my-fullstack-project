@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -705,6 +706,38 @@ func TestAdminEndpointRejectsNormalUser(t *testing.T) {
 	}
 }
 
+func TestAdminAvatarOnlyUpdateDoesNotRequireCurrentPassword(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	admin := createTestUser(t, "avatar_admin", 2)
+	token, err := generateToken(admin)
+	if err != nil {
+		t.Fatalf("鐢熸垚娴嬭瘯 token 澶辫触: %v", err)
+	}
+
+	// 头像裁剪确认后会自动保存，所以这里只提交 avatar，验证后端不会强制要求当前密码。
+	req := newJSONRequest(t, http.MethodPost, "/api/update-admin-profile", map[string]string{
+		"avatar": "data:image/png;base64,aGVsbG8=",
+	})
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	handleUpdateAdminProfile(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("鏈熸湜鐘舵€佺爜 200锛屽疄闄呭緱鍒?%d锛屽搷搴? %s", rec.Code, rec.Body.String())
+	}
+
+	var updated User
+	if err := db.First(&updated, admin.UID).Error; err != nil {
+		t.Fatalf("璇诲彇鏇存柊鍚庣殑绠＄悊鍛樺け璐? %v", err)
+	}
+	if updated.Avatar != "data:image/png;base64,aGVsbG8=" {
+		t.Fatalf("鏈熸湜澶村儚宸茶嚜鍔ㄤ繚瀛橈紝瀹為檯: %q", updated.Avatar)
+	}
+}
+
 func TestPublicTopicsOnlyReturnApproved(t *testing.T) {
 	setupTestDB(t)
 	if err := db.Create(&Topic{Name: "Hidden Topic", Description: "disabled", SortOrder: 20, Status: TopicStatusDisabled}).Error; err != nil {
@@ -878,6 +911,55 @@ func TestGetPostsIncludesAuthorSignature(t *testing.T) {
 	}
 	if len(posts) != 1 || posts[0]["signature"] != "在社区留下小小脚印" {
 		t.Fatalf("期望帖子带出作者个性签名，实际响应: %v", posts)
+	}
+}
+
+func TestPublicUserProfileAndPosts(t *testing.T) {
+	setupTestDB(t)
+	t.Setenv("APP_TOKEN_SECRET", "test-secret-for-api")
+
+	user := createTestUser(t, "public_profile_user", 0)
+	user.Nickname = "公开主页"
+	user.Signature = "这里展示我的帖子"
+	user.ThemeColorStart = "#22c55e"
+	user.ThemeColorEnd = "#06b6d4"
+	user.ThemeOpacity = 0.35
+	if err := db.Save(&user).Error; err != nil {
+		t.Fatalf("保存用户个性化资料失败: %v", err)
+	}
+	post := Post{Username: user.Username, TopicID: defaultTopicID(t), Title: "我的帖子", Content: "主页里应该能看到"}
+	if err := db.Create(&post).Error; err != nil {
+		t.Fatalf("创建用户帖子失败: %v", err)
+	}
+
+	profileReq := newJSONRequest(t, http.MethodGet, fmt.Sprintf("/api/user-profile?uid=%d", user.UID), nil)
+	profileRec := httptest.NewRecorder()
+	handleGetPublicUserProfile(profileRec, profileReq)
+	if profileRec.Code != http.StatusOK {
+		t.Fatalf("期望公开资料返回 200，实际 %d，响应 %s", profileRec.Code, profileRec.Body.String())
+	}
+
+	var profile map[string]interface{}
+	if err := json.Unmarshal(profileRec.Body.Bytes(), &profile); err != nil {
+		t.Fatalf("解析公开资料失败: %v", err)
+	}
+	if profile["nickname"] != "公开主页" || profile["theme_color_start"] != "#22c55e" {
+		t.Fatalf("公开资料没有带出个性化字段: %v", profile)
+	}
+
+	postsReq := newJSONRequest(t, http.MethodGet, fmt.Sprintf("/api/user-posts?uid=%d", user.UID), nil)
+	postsRec := httptest.NewRecorder()
+	handleGetUserPosts(postsRec, postsReq)
+	if postsRec.Code != http.StatusOK {
+		t.Fatalf("期望用户帖子返回 200，实际 %d，响应 %s", postsRec.Code, postsRec.Body.String())
+	}
+
+	var posts []map[string]interface{}
+	if err := json.Unmarshal(postsRec.Body.Bytes(), &posts); err != nil {
+		t.Fatalf("解析用户帖子失败: %v", err)
+	}
+	if len(posts) != 1 || posts[0]["author_uid"].(float64) != float64(user.UID) {
+		t.Fatalf("期望用户帖子带出 author_uid，实际: %v", posts)
 	}
 }
 

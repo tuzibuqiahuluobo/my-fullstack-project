@@ -112,6 +112,18 @@ func validateSignature(signature string) string {
 	return ""
 }
 
+func isHexColor(value string) bool {
+	if len(value) != 7 || value[0] != '#' {
+		return false
+	}
+	for _, char := range value[1:] {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 func validatePassword(password string) string {
 	length := textLength(password)
 	if length < passwordMinLength || length > passwordMaxLength {
@@ -174,13 +186,31 @@ func validateEmailAddress(email string) string {
 
 func publicUserPayload(user User) map[string]interface{} {
 	return map[string]interface{}{
-		"uid":       user.UID,
-		"username":  user.Username,
-		"nickname":  user.Nickname,
-		"signature": user.Signature,
-		"avatar":    user.Avatar,
-		"role":      user.Role,
+		"uid":                user.UID,
+		"username":           user.Username,
+		"nickname":           user.Nickname,
+		"signature":          user.Signature,
+		"avatar":             user.Avatar,
+		"role":               user.Role,
+		"profile_background": user.ProfileBackground,
+		"theme_color_start":  defaultThemeColor(user.ThemeColorStart, "#38bdf8"),
+		"theme_color_end":    defaultThemeColor(user.ThemeColorEnd, "#818cf8"),
+		"theme_opacity":      defaultThemeOpacity(user.ThemeOpacity),
 	}
+}
+
+func defaultThemeColor(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func defaultThemeOpacity(value float64) float64 {
+	if value < 0 || value > 0.85 {
+		return 0.28
+	}
+	return value
 }
 
 func isValidTopicStatus(status string) bool {
@@ -475,6 +505,13 @@ func fillCommentImagesForResponse(comment *Comment) {
 }
 
 func enrichCommentForResponse(comment *Comment) {
+	var author User
+	if err := db.Where("username = ?", comment.Username).First(&author).Error; err == nil {
+		// 评论里也补上 author_uid，前端点击评论头像或昵称时可以进入对方主页。
+		comment.AuthorUID = author.UID
+		comment.Nickname = author.Nickname
+		comment.Avatar = author.Avatar
+	}
 	// 新增：评论回复只保存 parent_id，读取时再补父评论昵称，这样父评论作者改昵称后回复提示也能跟着变。
 	if comment.ParentID != 0 {
 		var parent Comment
@@ -489,10 +526,12 @@ func enrichCommentForResponse(comment *Comment) {
 func enrichPostForResponse(post *Post, currentUser User, hasLoginUser bool) {
 	var author User
 	if err := db.Where("username = ?", post.Username).First(&author).Error; err == nil {
+		post.AuthorUID = author.UID
 		post.Nickname = author.Nickname
 		post.Avatar = author.Avatar
 		post.Signature = author.Signature
 	} else {
+		post.AuthorUID = 0
 		post.Nickname = "已注销用户"
 		post.Avatar = "https://api.dicebear.com/7.x/adventurer/svg?seed=deleted"
 		post.Signature = ""
@@ -666,6 +705,30 @@ func handleGetCurrentUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, publicUserPayload(user))
 }
 
+func handleGetPublicUserProfile(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
+	uid, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("uid")))
+	if err != nil || uid <= 0 {
+		writeError(w, http.StatusBadRequest, "用户 UID 不正确")
+		return
+	}
+
+	var user User
+	if err := db.First(&user, uint(uid)).Error; err != nil {
+		writeError(w, http.StatusNotFound, "找不到该用户")
+		return
+	}
+
+	var postCount int64
+	db.Model(&Post{}).Where("username = ?", user.Username).Count(&postCount)
+	payload := publicUserPayload(user)
+	payload["post_count"] = postCount
+	writeJSON(w, http.StatusOK, payload)
+}
+
 // ---------------------------------------------------------
 // 3. 修改资料接口
 // ---------------------------------------------------------
@@ -717,6 +780,32 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		// 个性签名允许清空，所以用指针判断前端是否真的提交了这个字段。
 		user.Signature = newSignature
+	}
+	if req.ProfileBackground != nil {
+		// 背景图用 base64 保存，初学阶段不用额外接对象存储；清空时传空字符串即可恢复默认背景。
+		user.ProfileBackground = strings.TrimSpace(*req.ProfileBackground)
+	}
+	if req.ThemeColorStart != "" {
+		if !isHexColor(req.ThemeColorStart) {
+			writeError(w, http.StatusBadRequest, "主题颜色格式不正确")
+			return
+		}
+		user.ThemeColorStart = req.ThemeColorStart
+	}
+	if req.ThemeColorEnd != "" {
+		if !isHexColor(req.ThemeColorEnd) {
+			writeError(w, http.StatusBadRequest, "主题颜色格式不正确")
+			return
+		}
+		user.ThemeColorEnd = req.ThemeColorEnd
+	}
+	if req.ThemeOpacity != nil {
+		// 透明度限制在 0 到 0.85，避免背景遮罩完全盖住图片或文字变得看不清。
+		if *req.ThemeOpacity < 0 || *req.ThemeOpacity > 0.85 {
+			writeError(w, http.StatusBadRequest, "背景透明度必须在 0 到 0.85 之间")
+			return
+		}
+		user.ThemeOpacity = *req.ThemeOpacity
 	}
 
 	if newUsername != "" && newUsername != user.Username {
@@ -1103,6 +1192,39 @@ func handleGetPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	for i := 0; i < len(posts); i++ {
+		enrichPostForResponse(&posts[i], currentUser, hasLoginUser)
+	}
+
+	writeJSON(w, http.StatusOK, posts)
+}
+
+func handleGetUserPosts(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
+	uid, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("uid")))
+	if err != nil || uid <= 0 {
+		writeError(w, http.StatusBadRequest, "用户 UID 不正确")
+		return
+	}
+
+	var targetUser User
+	if err := db.First(&targetUser, uint(uid)).Error; err != nil {
+		writeError(w, http.StatusNotFound, "找不到该用户")
+		return
+	}
+
+	// 帖子表里保留的是发布时的 username，所以按用户当前 username 查询自己的帖子。
+	// 如果以后把帖子表升级为直接存 uid，这里可以更高效地改成 author_uid 查询。
+	var posts []Post
+	if err := db.Where("username = ?", targetUser.Username).Order("created_at desc").Find(&posts).Error; err != nil {
+		writeError(w, http.StatusInternalServerError, "用户帖子读取失败")
+		return
+	}
+
+	currentUser, hasLoginUser := currentUserFromRequest(r)
 	for i := 0; i < len(posts); i++ {
 		enrichPostForResponse(&posts[i], currentUser, hasLoginUser)
 	}
@@ -1746,11 +1868,14 @@ func handleUpdateAdminProfile(w http.ResponseWriter, r *http.Request) {
 	newAvatar := strings.TrimSpace(req.Avatar)
 	newEmail := strings.ToLower(strings.TrimSpace(req.Email))
 	currentPassword := strings.TrimSpace(req.CurrentPassword)
-	if currentPassword == "" {
+	isAvatarOnlyUpdate := newAvatar != "" && newUsername == "" && newEmail == "" && newPassword == "" && currentPassword == ""
+	// 只更新头像时允许免输当前密码：裁剪头像属于低风险操作，这样确认裁剪后可以立即保存；
+	// 但账号、邮箱、密码这些敏感资料仍然必须校验当前密码，避免别人拿到登录态后修改关键资料。
+	if !isAvatarOnlyUpdate && currentPassword == "" {
 		writeError(w, http.StatusForbidden, "修改管理员资料必须输入当前密码")
 		return
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(currentPassword)); err != nil {
+	if !isAvatarOnlyUpdate && bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(currentPassword)) != nil {
 		writeError(w, http.StatusUnauthorized, "当前密码输入错误")
 		return
 	}
