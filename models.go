@@ -189,16 +189,35 @@ func ensureSuperAdminAccount(superAdminUsername string, superAdminEmail string, 
 	// 新增：把超级管理员同步逻辑抽出来，测试和真实启动都能复用同一套规则。
 	// 这样之后再改 .env 生效方式时，不容易出现“测试通过但启动逻辑忘记改”的问题。
 	var superAdmin User
-	if result := db.Where("role = ?", 2).First(&superAdmin); result.Error != nil {
+	hasSuperAdmin := db.Where("role = ?", 2).First(&superAdmin).Error == nil
+
+	if hasConfiguredUsername {
+		var configuredUser User
+		if err := db.Where("username = ?", superAdminUsername).First(&configuredUser).Error; err == nil {
+			// 新增：如果 .env 里的管理员账号已经是普通用户，就直接接管这条记录。
+			// 这样你删掉旧管理员后，不会因为同名普通用户占着 username 导致新管理员创建失败。
+			if hasSuperAdmin && configuredUser.UID != superAdmin.UID {
+				db.Model(&User{}).Where("uid = ?", superAdmin.UID).Update("role", 0)
+			}
+			superAdmin = configuredUser
+			hasSuperAdmin = true
+		}
+	}
+
+	if !hasSuperAdmin {
 		hash, _ := bcrypt.GenerateFromPassword([]byte(superAdminPassword), bcrypt.DefaultCost)
-		db.Create(&User{
+		admin := User{
 			Username:     superAdminUsername,
 			Nickname:     superAdminUsername, // 新增
 			Email:        superAdminEmail,
 			PasswordHash: string(hash),
 			Role:         2,
 			Avatar:       "https://api.dicebear.com/7.x/adventurer/svg?seed=Admin",
-		})
+		}
+		if err := db.Create(&admin).Error; err != nil {
+			fmt.Println("❌ 超级管理员创建失败，请检查 SUPER_ADMIN_USERNAME 或 SUPER_ADMIN_EMAIL 是否被占用:", err)
+			return
+		}
 		fmt.Println("👑 超级管理员账号已自动生成！")
 	} else {
 		// 已经存在超级管理员时，默认不覆盖后台手动改过的信息。
@@ -218,7 +237,10 @@ func ensureSuperAdminAccount(superAdminUsername string, superAdminEmail string, 
 		if superAdmin.Avatar == "" {
 			superAdmin.Avatar = "https://api.dicebear.com/7.x/adventurer/svg?seed=Admin"
 		}
-		db.Save(&superAdmin)
+		if err := db.Save(&superAdmin).Error; err != nil {
+			fmt.Println("❌ 超级管理员同步失败，请检查 .env 是否和已有用户账号/邮箱冲突:", err)
+			return
+		}
 		fmt.Println("🛡️ 超级管理员权限已确认！")
 	}
 }

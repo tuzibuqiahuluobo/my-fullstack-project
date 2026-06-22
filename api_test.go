@@ -155,6 +155,24 @@ func TestEnsureSuperAdminSyncsExplicitConfig(t *testing.T) {
 	}
 }
 
+func TestEnsureSuperAdminPromotesConfiguredExistingUser(t *testing.T) {
+	setupTestDB(t)
+
+	normalUser := createTestUser(t, "configuredadmin", 0)
+	ensureSuperAdminAccount("configuredadmin", "configured@qq.com", "EnvPassword123", true, true, true)
+
+	var updated User
+	if err := db.First(&updated, normalUser.UID).Error; err != nil {
+		t.Fatalf("读取被接管的用户失败: %v", err)
+	}
+	if updated.Role != 2 || updated.Email != "configured@qq.com" {
+		t.Fatalf("期望同名普通用户被提升为超级管理员，实际: %+v", updated)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(updated.PasswordHash), []byte("EnvPassword123")); err != nil {
+		t.Fatalf("期望同名用户密码被同步为 .env 密码")
+	}
+}
+
 func TestValidatePasswordAllowsDotSpecialChar(t *testing.T) {
 	if message := validatePassword("Secret123."); message != "" {
 		t.Fatalf("期望点号可以作为密码特殊字符，实际错误: %s", message)
