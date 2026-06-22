@@ -20,6 +20,9 @@ func main() {
 	mux.HandleFunc("/api/me", handleGetCurrentUser)
 	mux.HandleFunc("/api/user-profile", handleGetPublicUserProfile)
 	mux.HandleFunc("/api/update", handleUpdate)
+	mux.HandleFunc("/api/upload-background", handleUploadBackground)
+	// 个性化背景保存成真实文件后，通过 /api/uploads/ 暴露出来；这样线上 Nginx 只代理 /api/ 也能访问图片。
+	mux.Handle("/api/uploads/", http.StripPrefix("/api/uploads/", http.FileServer(http.Dir("uploads"))))
 	mux.HandleFunc("/api/send-code", handleSendCode)
 	mux.HandleFunc("/api/recover-account", handleRecoverAccount)
 	mux.HandleFunc("/api/reset-password", handleResetPassword)

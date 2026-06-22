@@ -5,10 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/mail"
 	"net/smtp"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +36,7 @@ const (
 	topicDescMaxLength   = 120
 	postMaxTagCount      = 5
 	postTagMaxLength     = 12
+	backgroundMaxBytes   = 6 * 1024 * 1024
 	// 图片转成 base64 后会比原文件大约多三分之一，所以后端按 dataURL 长度给 3MB 余量。
 	postImageMaxLength = 3 * 1024 * 1024
 )
@@ -193,6 +197,7 @@ func publicUserPayload(user User) map[string]interface{} {
 		"avatar":             user.Avatar,
 		"role":               user.Role,
 		"profile_background": user.ProfileBackground,
+		"welcome_background": user.WelcomeBackground,
 		"theme_color_start":  defaultThemeColor(user.ThemeColorStart, "#38bdf8"),
 		"theme_color_end":    defaultThemeColor(user.ThemeColorEnd, "#818cf8"),
 		"theme_opacity":      defaultThemeOpacity(user.ThemeOpacity),
@@ -208,7 +213,7 @@ func defaultThemeColor(value string, fallback string) string {
 
 func defaultThemeOpacity(value float64) float64 {
 	if value < 0 || value > 0.85 {
-		return 0.28
+		return 0.08
 	}
 	return value
 }
@@ -560,6 +565,107 @@ func enrichPostForResponse(post *Post, currentUser User, hasLoginUser bool) {
 	fillPostTagsForResponse(post)
 }
 
+func backgroundFileExt(contentType string) string {
+	switch contentType {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ""
+	}
+}
+
+func publicRequestBaseURL(r *http.Request) string {
+	protocol := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if protocol == "" {
+		if r.TLS != nil {
+			protocol = "https"
+		} else {
+			protocol = "http"
+		}
+	}
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = r.Host
+	}
+	return protocol + "://" + host
+}
+
+func randomUploadName(uid uint, ext string) (string, error) {
+	randomBytes := make([]byte, 8)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", err
+	}
+	// 文件名只使用 uid、时间戳和随机串，不使用用户上传的原文件名，避免特殊字符造成路径问题。
+	return fmt.Sprintf("bg_%d_%d_%s%s", uid, time.Now().UnixNano(), base64.RawURLEncoding.EncodeToString(randomBytes), ext), nil
+}
+
+func handleUploadBackground(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	user, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, backgroundMaxBytes+1024)
+	if err := r.ParseMultipartForm(backgroundMaxBytes); err != nil {
+		writeError(w, http.StatusBadRequest, "背景图片不能超过 6MB")
+		return
+	}
+
+	file, _, err := r.FormFile("image")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "请上传背景图片")
+		return
+	}
+	defer file.Close()
+
+	head := make([]byte, 512)
+	n, _ := file.Read(head)
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeError(w, http.StatusBadRequest, "背景图片读取失败")
+		return
+	}
+	contentType := http.DetectContentType(head[:n])
+	ext := backgroundFileExt(contentType)
+	if ext == "" {
+		writeError(w, http.StatusBadRequest, "背景图只支持 JPG、PNG、WEBP")
+		return
+	}
+
+	uploadDir := filepath.Join("uploads", "backgrounds")
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
+		writeError(w, http.StatusInternalServerError, "背景目录创建失败")
+		return
+	}
+	fileName, err := randomUploadName(user.UID, ext)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "背景文件名生成失败")
+		return
+	}
+	targetPath := filepath.Join(uploadDir, fileName)
+	targetFile, err := os.Create(targetPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "背景文件保存失败")
+		return
+	}
+	defer targetFile.Close()
+
+	if _, err := io.Copy(targetFile, file); err != nil {
+		writeError(w, http.StatusInternalServerError, "背景文件写入失败")
+		return
+	}
+
+	// 返回完整 URL，前端退出登录后再次登录也能从数据库里的 URL 恢复背景状态。
+	publicURL := publicRequestBaseURL(r) + "/api/uploads/backgrounds/" + fileName
+	writeJSON(w, http.StatusOK, map[string]string{"url": publicURL})
+}
+
 // ---------------------------------------------------------
 // 1. 注册接口
 // ---------------------------------------------------------
@@ -782,8 +888,12 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 		user.Signature = newSignature
 	}
 	if req.ProfileBackground != nil {
-		// 背景图用 base64 保存，初学阶段不用额外接对象存储；清空时传空字符串即可恢复默认背景。
+		// 背景图现在保存的是上传接口返回的 URL；清空时传空字符串即可恢复默认背景。
 		user.ProfileBackground = strings.TrimSpace(*req.ProfileBackground)
+	}
+	if req.WelcomeBackground != nil {
+		// 欢迎页背景单独保存，避免为了欢迎页裁剪影响个人主页背景。
+		user.WelcomeBackground = strings.TrimSpace(*req.WelcomeBackground)
 	}
 	if req.ThemeColorStart != "" {
 		if !isHexColor(req.ThemeColorStart) {

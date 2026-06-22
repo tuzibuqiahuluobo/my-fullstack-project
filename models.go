@@ -33,6 +33,7 @@ type User struct {
 	Nickname          string    `json:"nickname"`            // 【新增】用户昵称
 	Signature         string    `json:"signature"`           // 【新增】个性签名，最多 50 个字
 	ProfileBackground string    `json:"profile_background"`  // 新增：保存个人背景图，别人访问主页时也能看到同一张图。
+	WelcomeBackground string    `json:"welcome_background"`  // 新增：欢迎页可以单独设置背景，不强制和个人主页共用。
 	ThemeColorStart   string    `json:"theme_color_start"`   // 新增：主题渐变起始色，用来统一按钮和菜单的个性颜色。
 	ThemeColorEnd     string    `json:"theme_color_end"`     // 新增：主题渐变结束色，两种颜色组合后可以形成渐变。
 	ThemeOpacity      float64   `json:"theme_opacity"`       // 新增：背景遮罩透明度，避免背景图太花影响文字阅读。
@@ -106,6 +107,7 @@ type UpdateRequest struct {
 	Nickname          string   `json:"nickname"`           // 【新增】前端传来的新昵称
 	Signature         *string  `json:"signature"`          // 【新增】指针可以区分“没传”和“传了空字符串清空签名”
 	ProfileBackground *string  `json:"profile_background"` // 新增：允许清空背景，所以也用指针区分是否提交。
+	WelcomeBackground *string  `json:"welcome_background"` // 新增：欢迎页背景也允许清空，空值表示回到默认。
 	ThemeColorStart   string   `json:"theme_color_start"`  // 新增：前端调色盘选择的第一种主题色。
 	ThemeColorEnd     string   `json:"theme_color_end"`    // 新增：前端调色盘选择的第二种主题色。
 	ThemeOpacity      *float64 `json:"theme_opacity"`      // 新增：透明度可以是 0，所以用指针判断是否提交。
